@@ -1,0 +1,8 @@
+{
+  "name": "CareerForge AI 3.0",
+  "description": "Advanced Multi-Agent Career Operating System. Features Resume Architect (Gemini 3.0), Interview Simulator (Live API), and Market Scout (Search Grounding).",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
