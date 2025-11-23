@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
-import { InterviewStatus, InterviewPersona } from '../types';
+import { InterviewStatus, InterviewPersona, TranscriptItem } from '../types';
 
 const AI_KEY = process.env.API_KEY || '';
 
-export const useLiveAudio = (role: string, persona: InterviewPersona) => {
+export const useLiveAudio = (role: string, persona: InterviewPersona, userContext: string) => {
   const [status, setStatus] = useState<InterviewStatus>('idle');
   const [volume, setVolume] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
+  const [isAiSpeaking, setIsAiSpeaking] = useState(false);
+  const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
   
   // Refs for audio processing
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -15,6 +17,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
   const streamRef = useRef<MediaStream | null>(null);
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const nextStartTimeRef = useRef<number>(0);
+  const sourceNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
   // Helper: Create PCM Blob
   const createBlob = (data: Float32Array) => {
@@ -54,18 +57,37 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
   };
 
   const getSystemInstruction = () => {
-    const base = `You are an interviewer for a ${role} position.`;
+    const base = `You are an experienced technical interviewer conducting a voice-only interview for a ${role} position.`;
     
-    switch (persona) {
-      case 'Junior Peer':
-        return `${base} You are a potential teammate (Junior/Mid level). Keep it friendly, ask about their favorite tools, collaboration style, and basic technical concepts. Focus on cultural fit and enthusiasm.`;
-      case 'Senior Engineer':
-        return `${base} You are a Senior Engineer. Ask standard technical questions, check their knowledge of best practices, testing, and debugging. Be professional and encouraging.`;
-      case 'Staff Architect':
-        return `${base} You are a Staff/Principal Architect. Grill them on System Design, Scalability, Trade-offs (CAP theorem, ACID vs BASE), and complex edge cases. Be exacting and expect high-quality, deep answers. Do not tolerate fluff.`;
-      default:
-        return base;
+    let style = "Tone: Professional, balanced. Focus on core competencies and problem solving.";
+    
+    if (persona === 'Junior Peer') {
+       style = "Tone: Friendly, casual, encouraging. Focus on collaboration, basic knowledge, and willingness to learn.";
+    } else if (persona === 'Senior Engineer') {
+       style = "Tone: Professional, standard technical depth. Expect solid reasoning and best practices.";
+    } else if (persona === 'Staff Architect') {
+       style = "Tone: Strict, high-level system design focused. Probe for scalability limits, trade-offs, and failure modes.";
+    } else if (persona === 'Tech Lead') {
+       style = "Tone: Pragmatic, focused on code maintainability, team impact, and technical debt. Ask about 'why' not just 'how'.";
+    } else if (persona === 'Hiring Manager') {
+       style = "Tone: Behavioral, focus on culture fit, career goals, conflict resolution, and soft skills (use STAR method).";
     }
+
+    return `
+      ${base}
+      ${style}
+      
+      Candidate Context: "${userContext}"
+      Adjust your questions to match the candidate's stated experience level and focus area.
+
+      CRITICAL RULES:
+      1. Keep your responses BRIEF (1-3 sentences). This is a conversation, not a lecture.
+      2. Ask ONE question at a time. Wait for the user to answer.
+      3. If the user is silent, prompt them gently.
+      4. Listen to the user's answer. If it's vague, dig deeper.
+      5. Do not hallucinate code. Focus on concepts and verbal problem solving.
+      6. Treat this as a real-time back-and-forth dialogue.
+    `;
   };
 
   const connect = useCallback(async () => {
@@ -74,14 +96,20 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
       return;
     }
     setStatus('connecting');
+    setTranscript([]); // Clear previous transcript
 
     try {
       const ai = new GoogleGenAI({ apiKey: AI_KEY });
       
+      // Initialize Audio Contexts
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       inputContextRef.current = new AudioCtx({ sampleRate: 16000 });
       audioContextRef.current = new AudioCtx({ sampleRate: 24000 });
       
+      if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
@@ -93,6 +121,9 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: persona === 'Staff Architect' ? 'Fenrir' : 'Puck' } },
           },
           systemInstruction: getSystemInstruction(),
+          // Fix: Send empty objects to enable transcription. Do not send { model: ... } here.
+          inputAudioTranscription: {}, 
+          outputAudioTranscription: {}, 
         },
       };
 
@@ -102,6 +133,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
         callbacks: {
           onopen: () => {
             setStatus('active');
+            nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
             
             if (!inputContextRef.current || !streamRef.current) return;
             
@@ -109,25 +141,39 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
             const processor = inputContextRef.current.createScriptProcessor(4096, 1, 1);
             
             processor.onaudioprocess = (e) => {
-              if (isMuted) return;
-              
               const inputData = e.inputBuffer.getChannelData(0);
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
-              setVolume(Math.sqrt(sum / inputData.length));
+              const vol = Math.sqrt(sum / inputData.length);
+              setVolume(vol);
 
-              const blob = createBlob(inputData);
-              sessionPromiseRef.current?.then(session => {
-                session.sendRealtimeInput({ media: blob });
-              });
+              if (!isMuted) {
+                 const blob = createBlob(inputData);
+                 sessionPromiseRef.current?.then(session => {
+                   session.sendRealtimeInput({ media: blob });
+                 });
+              }
             };
 
             source.connect(processor);
             processor.connect(inputContextRef.current.destination);
           },
           onmessage: async (msg: LiveServerMessage) => {
+            // Handle Transcription
+            if (msg.serverContent?.outputTranscription?.text) {
+               setTranscript(prev => [...prev, { speaker: 'ai', text: msg.serverContent?.outputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+            }
+            if (msg.serverContent?.inputTranscription?.text) {
+               setTranscript(prev => [...prev, { speaker: 'user', text: msg.serverContent?.inputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+            }
+
+            // Handle Audio
             const data = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (data && audioContextRef.current) {
+              if (audioContextRef.current.state === 'suspended') {
+                 await audioContextRef.current.resume();
+              }
+
               const buffer = await decodeAudioData(data, audioContextRef.current);
               const source = audioContextRef.current.createBufferSource();
               source.buffer = buffer;
@@ -137,14 +183,25 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
               const startTime = Math.max(nextStartTimeRef.current, currentTime);
               source.start(startTime);
               nextStartTimeRef.current = startTime + buffer.duration;
+              
+              sourceNodesRef.current.add(source);
+              setIsAiSpeaking(true);
+              source.onended = () => {
+                sourceNodesRef.current.delete(source);
+                if (sourceNodesRef.current.size === 0) {
+                    setIsAiSpeaking(false);
+                }
+              };
             }
           },
           onclose: () => {
             setStatus('idle');
+            setIsAiSpeaking(false);
           },
           onerror: (err) => {
             console.error("Live Error", err);
             setStatus('error');
+            setIsAiSpeaking(false);
           }
         }
       });
@@ -155,7 +212,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
       console.error(e);
       setStatus('error');
     }
-  }, [role, persona, isMuted]);
+  }, [role, persona, userContext, isMuted]);
 
   const disconnect = useCallback(() => {
     if (sessionPromiseRef.current) {
@@ -164,11 +221,15 @@ export const useLiveAudio = (role: string, persona: InterviewPersona) => {
     streamRef.current?.getTracks().forEach(t => t.stop());
     inputContextRef.current?.close();
     audioContextRef.current?.close();
+    sourceNodesRef.current.forEach(s => s.stop());
+    sourceNodesRef.current.clear();
+    
     setStatus('idle');
     setVolume(0);
+    setIsAiSpeaking(false);
   }, []);
 
   const toggleMute = () => setIsMuted(!isMuted);
 
-  return { connect, disconnect, toggleMute, isMuted, status, volume };
+  return { connect, disconnect, toggleMute, isMuted, isAiSpeaking, status, volume, transcript };
 };

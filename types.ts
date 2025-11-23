@@ -8,7 +8,7 @@ export enum ActiveTab {
 }
 
 export type InterviewStatus = 'idle' | 'connecting' | 'active' | 'error';
-export type InterviewPersona = 'Junior Peer' | 'Senior Engineer' | 'Staff Architect';
+export type InterviewPersona = 'Junior Peer' | 'Senior Engineer' | 'Staff Architect' | 'Tech Lead' | 'Hiring Manager';
 
 // --- Agent Schemas ---
 
@@ -45,6 +45,13 @@ export interface GroundingSource {
   title: string;
 }
 
+export interface JobListing {
+  title: string;
+  company: string;
+  location: string;
+  description: string;
+}
+
 export interface MarketReport {
   roleOverview: string;
   compensationBreakdown: {
@@ -55,7 +62,8 @@ export interface MarketReport {
     currency: string;
   };
   negotiationPoints: string[];
-  hiringTrends: string[];
+  hiringTrends: { trend: string; demandScore: number }[]; // Updated for Tag Cloud
+  jobListings: JobListing[]; // New: Job Search Results
   topTechHubs: string[];
   sources: GroundingSource[];
 }
@@ -77,4 +85,26 @@ export interface PortfolioAnalysis {
   projects: PortfolioProject[];
   missingEngineeringPractices: string[];
   holisticAdvice: string[];
+}
+
+export interface TranscriptItem {
+  speaker: 'user' | 'ai';
+  text: string;
+  timestamp: string;
+}
+
+export interface InterviewFeedbackDetail {
+  category: 'Strength' | 'Improvement';
+  observation: string;
+  quote: string;
+}
+
+export interface InterviewFeedback {
+  overallScore: number;
+  technicalAccuracy: string;
+  communicationClarity: string;
+  keyStrengths: string[];
+  areasForImprovement: string[];
+  detailedFeedback: InterviewFeedbackDetail[]; // New: Specific evidence
+  hiringRecommendation: "Strong No Hire" | "No Hire" | "Leaning No Hire" | "Leaning Hire" | "Hire" | "Strong Hire";
 }

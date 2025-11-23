@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis } from "../types";
+import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis, TranscriptItem, InterviewFeedback } from "../types";
 
 /**
  * Helper to extract JSON from markdown code blocks or raw text
@@ -71,7 +71,7 @@ export const analyzeResumeDeep = async (
             example: { type: Type.STRING, description: "A concrete example of how to implement this." }
           }
         }, 
-        description: "A comprehensive strategic plan." 
+        description: "A comprehensive strategic plan with at least 5 prioritized items." 
       },
       rewrites: {
         type: Type.ARRAY,
@@ -133,6 +133,8 @@ export const scoutMarket = async (
       
       1. Use Google Search to find real-time data from sources like Levels.fyi, Glassdoor, LinkedIn.
       2. Find **Total Compensation (TC)** numbers. Return purely NUMERIC values for the salary fields (no currency symbols or commas in the numbers, just raw integers).
+      3. Identify key hiring trends (technologies, methodologies) and assign a 'demandScore' (1-10) to each.
+      4. Find 3-5 active or recent job listings relevant to this role in this location from the search results.
       
       Output JSON format:
       {
@@ -145,7 +147,8 @@ export const scoutMarket = async (
           "currency": "string (e.g. USD, GBP, LKR)" 
         },
         "negotiationPoints": ["string"],
-        "hiringTrends": ["string"],
+        "hiringTrends": [{ "trend": "string", "demandScore": number (1-10) }],
+        "jobListings": [{ "title": "string", "company": "string", "location": "string", "description": "string" }],
         "topTechHubs": ["string"]
       }
     `,
@@ -223,4 +226,89 @@ export const analyzePortfolio = async (
 
   if (!response.text) throw new Error("Agent Delta failed.");
   return cleanAndParseJSON(response.text) as PortfolioAnalysis;
-}
+};
+
+/**
+ * Generate Interview Questions based on role
+ */
+export const generateInterviewQuestions = async (role: string): Promise<string[]> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: `Generate 5 common but challenging technical interview questions for a ${role} position. Return them as a simple JSON array of strings.`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING }
+      }
+    }
+  });
+
+  if (!response.text) return ["Tell me about yourself.", "What is your greatest strength?", "Describe a challenge you faced."];
+  return cleanAndParseJSON(response.text) as string[];
+};
+
+/**
+ * Generate Interview Feedback Report
+ */
+export const generateInterviewFeedback = async (
+  transcript: TranscriptItem[],
+  role: string
+): Promise<InterviewFeedback> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const formattedTranscript = transcript.map(t => `${t.speaker.toUpperCase()}: ${t.text}`).join('\n');
+
+  const schema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      overallScore: { type: Type.NUMBER, description: "Score out of 100" },
+      technicalAccuracy: { type: Type.STRING },
+      communicationClarity: { type: Type.STRING },
+      keyStrengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+      areasForImprovement: { type: Type.ARRAY, items: { type: Type.STRING } },
+      detailedFeedback: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            category: { type: Type.STRING, enum: ["Strength", "Improvement"] },
+            observation: { type: Type.STRING },
+            quote: { type: Type.STRING, description: "Exact quote from transcript" }
+          }
+        },
+        description: "Specific evidence from the conversation supporting the grade."
+      },
+      hiringRecommendation: { type: Type.STRING, enum: ["Strong No Hire", "No Hire", "Leaning No Hire", "Leaning Hire", "Hire", "Strong Hire"] }
+    },
+    required: ["overallScore", "technicalAccuracy", "communicationClarity", "keyStrengths", "areasForImprovement", "detailedFeedback", "hiringRecommendation"]
+  };
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-preview",
+    contents: `
+      You are a Bar Raiser at a FAANG company. 
+      Review this interview transcript for a ${role} position.
+      
+      Transcript:
+      ${formattedTranscript}
+      
+      Evaluate the candidate's performance based on:
+      1. Technical Correctness (Did they know the answers?)
+      2. Communication (Were they concise? Did they ramble?)
+      3. Signal (Is there evidence of seniority?)
+      
+      Critically, you MUST cite specific parts of the transcript in 'detailedFeedback' to justify your score.
+    `,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+      thinkingConfig: { thinkingBudget: 4096 }
+    }
+  });
+
+  if (!response.text) throw new Error("Feedback generation failed.");
+  return cleanAndParseJSON(response.text) as InterviewFeedback;
+};
