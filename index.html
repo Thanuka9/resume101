@@ -29,6 +29,52 @@
         from { opacity: 0; transform: translateY(20px); }
         to { opacity: 1; transform: translateY(0); }
       }
+      
+      /* 3D Background Effects */
+      .perspective-container {
+        perspective: 1000px;
+        overflow: hidden;
+      }
+      .grid-floor {
+        position: absolute;
+        width: 200%;
+        height: 200%;
+        left: -50%;
+        top: -25%;
+        background-image: 
+          linear-gradient(to right, rgba(6, 182, 212, 0.15) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(6, 182, 212, 0.15) 1px, transparent 1px);
+        background-size: 60px 60px;
+        transform: rotateX(60deg);
+        animation: gridMove 20s linear infinite;
+        mask-image: radial-gradient(circle at 50% 50%, black 0%, transparent 70%);
+        pointer-events: none;
+        z-index: 0;
+      }
+      @keyframes gridMove {
+        from { background-position: 0 0; }
+        to { background-position: 0 60px; }
+      }
+
+      .star {
+        position: absolute;
+        background: white;
+        border-radius: 50%;
+        animation: twinkle var(--duration) ease-in-out infinite;
+        opacity: var(--opacity);
+      }
+
+      @keyframes twinkle {
+        0%, 100% { transform: scale(1); opacity: var(--opacity); }
+        50% { transform: scale(1.5); opacity: 1; }
+      }
+      
+      .glass-card {
+        background: rgba(15, 23, 42, 0.7);
+        backdrop-filter: blur(16px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+      }
     </style>
   <script type="importmap">
 {
@@ -41,7 +87,7 @@
 }
 </script>
 </head>
-  <body class="bg-[#0a0f1c] text-white antialiased">
+  <body class="bg-[#020617] text-white antialiased overflow-x-hidden">
     <div id="root"></div>
   </body>
 </html>

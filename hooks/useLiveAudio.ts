@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+
+import { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { InterviewStatus, InterviewPersona, TranscriptItem } from '../types';
 
@@ -10,108 +11,147 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
   const [isMuted, setIsMuted] = useState(false);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
+  const [connectionLogs, setConnectionLogs] = useState<string[]>([]);
   
-  // Refs for audio processing
   const audioContextRef = useRef<AudioContext | null>(null);
   const inputContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const sourceNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const checkIntervalRef = useRef<any>(null);
 
-  // Helper: Create PCM Blob
+  const addLog = (msg: string) => setConnectionLogs(prev => [...prev.slice(-4), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+
+  // --- Helpers ---
   const createBlob = (data: Float32Array) => {
     const l = data.length;
     const int16 = new Int16Array(l);
-    for (let i = 0; i < l; i++) {
-      int16[i] = data[i] * 32768;
-    }
+    for (let i = 0; i < l; i++) int16[i] = data[i] * 32768;
     const uint8 = new Uint8Array(int16.buffer);
     let binary = '';
-    const len = uint8.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(uint8[i]);
-    }
-    const b64 = btoa(binary);
-    return {
-      data: b64,
-      mimeType: 'audio/pcm;rate=16000',
-    };
+    for (let i = 0; i < uint8.byteLength; i++) binary += String.fromCharCode(uint8[i]);
+    return { data: btoa(binary), mimeType: 'audio/pcm;rate=16000' };
   };
 
-  // Helper: Decode Audio
   const decodeAudioData = async (base64: string, ctx: AudioContext) => {
     const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
     const dataInt16 = new Int16Array(bytes.buffer);
     const buffer = ctx.createBuffer(1, dataInt16.length, 24000);
     const channelData = buffer.getChannelData(0);
-    for (let i = 0; i < channelData.length; i++) {
-      channelData[i] = dataInt16[i] / 32768.0;
-    }
+    for (let i = 0; i < channelData.length; i++) channelData[i] = dataInt16[i] / 32768.0;
     return buffer;
   };
 
-  const getSystemInstruction = () => {
-    const base = `You are an experienced technical interviewer conducting a voice-only interview for a ${role} position.`;
-    
-    let style = "Tone: Professional, balanced. Focus on core competencies and problem solving.";
-    
-    if (persona === 'Junior Peer') {
-       style = "Tone: Friendly, casual, encouraging. Focus on collaboration, basic knowledge, and willingness to learn.";
-    } else if (persona === 'Senior Engineer') {
-       style = "Tone: Professional, standard technical depth. Expect solid reasoning and best practices.";
-    } else if (persona === 'Staff Architect') {
-       style = "Tone: Strict, high-level system design focused. Probe for scalability limits, trade-offs, and failure modes.";
-    } else if (persona === 'Tech Lead') {
-       style = "Tone: Pragmatic, focused on code maintainability, team impact, and technical debt. Ask about 'why' not just 'how'.";
-    } else if (persona === 'Hiring Manager') {
-       style = "Tone: Behavioral, focus on culture fit, career goals, conflict resolution, and soft skills (use STAR method).";
+  const playTestSound = async () => {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(440, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+    setTimeout(() => ctx.close(), 500);
+  };
+
+  const stopCheckLoop = () => {
+    if (checkIntervalRef.current) {
+        cancelAnimationFrame(checkIntervalRef.current);
+        checkIntervalRef.current = null;
     }
+  };
+
+  const checkMic = async () => {
+     try {
+       stopCheckLoop();
+       setConnectionLogs([]);
+       addLog("Requesting Mic Access...");
+       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+       addLog("Mic Access Granted");
+       setStatus('mic-check');
+       
+       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+       if (inputContextRef.current) inputContextRef.current.close();
+       
+       inputContextRef.current = new AudioCtx({ sampleRate: 16000 });
+       const source = inputContextRef.current.createMediaStreamSource(stream);
+       const analyzer = inputContextRef.current.createAnalyser();
+       analyzer.fftSize = 256;
+       source.connect(analyzer);
+       
+       const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+       const updateVolume = () => {
+         analyzer.getByteFrequencyData(dataArray);
+         let sum = 0;
+         for (let i=0; i<dataArray.length; i++) sum += dataArray[i];
+         setVolume((sum / dataArray.length) / 128); 
+         checkIntervalRef.current = requestAnimationFrame(updateVolume);
+       };
+       updateVolume();
+       streamRef.current = stream;
+     } catch (e) {
+       console.error("Mic check failed", e);
+       addLog("Mic Access Denied/Error");
+       alert("Could not access microphone.");
+       setStatus('error');
+     }
+  };
+
+  const getSystemInstruction = () => {
+    let style = "";
+    if (persona === 'Junior Peer') style = "PERSONA: Junior Peer. Friendly. Start with: 'Hey! Ready to chat about your code?'";
+    else if (persona === 'Senior Engineer') style = "PERSONA: Senior Engineer. Direct. Start with: 'Hello. Let's review your technical background.'";
+    else if (persona === 'Staff Architect') style = "PERSONA: Staff Architect. Focus on scale. Start with: 'Hi. I want to dig into system design today.'";
+    else if (persona === 'Tech Lead') style = "PERSONA: Tech Lead. Focus on quality. Start with: 'Hi. Let's discuss your approach to maintainability.'";
+    else style = "PERSONA: Hiring Manager. Focus on soft skills. Start with: 'Hi. Tell me what drives you in your career.'";
 
     return `
-      ${base}
+      You are an interviewer for a ${role} position.
       ${style}
-      
       Candidate Context: "${userContext}"
-      Adjust your questions to match the candidate's stated experience level and focus area.
-
-      CRITICAL RULES:
-      1. Keep your responses BRIEF (1-3 sentences). This is a conversation, not a lecture.
-      2. Ask ONE question at a time. Wait for the user to answer.
-      3. If the user is silent, prompt them gently.
-      4. Listen to the user's answer. If it's vague, dig deeper.
-      5. Do not hallucinate code. Focus on concepts and verbal problem solving.
-      6. Treat this as a real-time back-and-forth dialogue.
+      Rules:
+      1. YOU SPEAK FIRST using the exact greeting above.
+      2. Keep questions short (1-2 sentences).
+      3. Wait for the user to answer.
     `;
   };
 
   const connect = useCallback(async () => {
-    if (!AI_KEY) {
-      console.error("No API Key");
-      return;
-    }
+    if (!AI_KEY) return;
+    stopCheckLoop();
     setStatus('connecting');
-    setTranscript([]); // Clear previous transcript
+    setTranscript([]); 
+    addLog("Initializing Session...");
 
     try {
       const ai = new GoogleGenAI({ apiKey: AI_KEY });
-      
-      // Initialize Audio Contexts
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      
+      // Ensure clean contexts
+      if (inputContextRef.current) inputContextRef.current.close();
       inputContextRef.current = new AudioCtx({ sampleRate: 16000 });
+
+      if (audioContextRef.current) audioContextRef.current.close();
       audioContextRef.current = new AudioCtx({ sampleRate: 24000 });
       
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
+      // Resume context (important for browsers)
+      await inputContextRef.current.resume();
+      await audioContextRef.current.resume();
+      
+      let stream = streamRef.current;
+      if (!stream || !stream.active) {
+         addLog("Re-acquiring Mic...");
+         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+         streamRef.current = stream;
       }
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
 
       const config = {
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -121,115 +161,96 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
             voiceConfig: { prebuiltVoiceConfig: { voiceName: persona === 'Staff Architect' ? 'Fenrir' : 'Puck' } },
           },
           systemInstruction: getSystemInstruction(),
-          // Fix: Send empty objects to enable transcription. Do not send { model: ... } here.
-          inputAudioTranscription: {}, 
-          outputAudioTranscription: {}, 
+          inputAudioTranscription: {}, // Request transcript
+          outputAudioTranscription: {}, // Request transcript
         },
       };
 
+      addLog("Connecting to Gemini Live...");
       const sessionPromise = ai.live.connect({
         model: config.model,
         config: config.config,
         callbacks: {
-          onopen: () => {
+          onopen: async () => {
             setStatus('active');
+            addLog("Connected! Sending greeting trigger...");
             nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
             
-            if (!inputContextRef.current || !streamRef.current) return;
-            
-            const source = inputContextRef.current.createMediaStreamSource(streamRef.current);
-            const processor = inputContextRef.current.createScriptProcessor(4096, 1, 1);
+            // Send Greeting Trigger
+            sessionPromiseRef.current?.then(session => {
+               session.sendRealtimeInput([{ mimeType: 'text/plain', data: btoa("User connected. Say your greeting now.") }]);
+            });
+
+            // Setup Audio Processing
+            const source = inputContextRef.current!.createMediaStreamSource(streamRef.current!);
+            const processor = inputContextRef.current!.createScriptProcessor(4096, 1, 1);
             
             processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
+              // Volume Viz
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
-              const vol = Math.sqrt(sum / inputData.length);
-              setVolume(vol);
+              setVolume(Math.sqrt(sum / inputData.length));
 
               if (!isMuted) {
                  const blob = createBlob(inputData);
-                 sessionPromiseRef.current?.then(session => {
-                   session.sendRealtimeInput({ media: blob });
-                 });
+                 sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: blob }));
               }
             };
 
             source.connect(processor);
-            processor.connect(inputContextRef.current.destination);
+            processor.connect(inputContextRef.current!.destination); // Keep alive
           },
           onmessage: async (msg: LiveServerMessage) => {
-            // Handle Transcription
             if (msg.serverContent?.outputTranscription?.text) {
-               setTranscript(prev => [...prev, { speaker: 'ai', text: msg.serverContent?.outputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+               setTranscript(p => [...p, { speaker: 'ai', text: msg.serverContent?.outputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
             }
             if (msg.serverContent?.inputTranscription?.text) {
-               setTranscript(prev => [...prev, { speaker: 'user', text: msg.serverContent?.inputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+               setTranscript(p => [...p, { speaker: 'user', text: msg.serverContent?.inputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
             }
 
-            // Handle Audio
             const data = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (data && audioContextRef.current) {
-              if (audioContextRef.current.state === 'suspended') {
-                 await audioContextRef.current.resume();
-              }
-
               const buffer = await decodeAudioData(data, audioContextRef.current);
               const source = audioContextRef.current.createBufferSource();
               source.buffer = buffer;
               source.connect(audioContextRef.current.destination);
-              
-              const currentTime = audioContextRef.current.currentTime;
-              const startTime = Math.max(nextStartTimeRef.current, currentTime);
+              const startTime = Math.max(nextStartTimeRef.current, audioContextRef.current.currentTime);
               source.start(startTime);
               nextStartTimeRef.current = startTime + buffer.duration;
-              
               sourceNodesRef.current.add(source);
               setIsAiSpeaking(true);
               source.onended = () => {
                 sourceNodesRef.current.delete(source);
-                if (sourceNodesRef.current.size === 0) {
-                    setIsAiSpeaking(false);
-                }
+                if (sourceNodesRef.current.size === 0) setIsAiSpeaking(false);
               };
             }
           },
-          onclose: () => {
-            setStatus('idle');
-            setIsAiSpeaking(false);
-          },
-          onerror: (err) => {
-            console.error("Live Error", err);
-            setStatus('error');
-            setIsAiSpeaking(false);
-          }
+          onclose: () => { setStatus('finished'); setIsAiSpeaking(false); addLog("Session Closed"); },
+          onerror: (err) => { console.error(err); setStatus('error'); setIsAiSpeaking(false); addLog(`Error: ${err}`); }
         }
       });
-
       sessionPromiseRef.current = sessionPromise;
-
     } catch (e) {
       console.error(e);
       setStatus('error');
+      addLog("Connection Failed");
     }
   }, [role, persona, userContext, isMuted]);
 
   const disconnect = useCallback(() => {
-    if (sessionPromiseRef.current) {
-      sessionPromiseRef.current.then(s => s.close());
-    }
+    stopCheckLoop();
+    if (sessionPromiseRef.current) sessionPromiseRef.current.then(s => s.close());
     streamRef.current?.getTracks().forEach(t => t.stop());
     inputContextRef.current?.close();
     audioContextRef.current?.close();
     sourceNodesRef.current.forEach(s => s.stop());
     sourceNodesRef.current.clear();
-    
-    setStatus('idle');
-    setVolume(0);
+    setStatus('finished');
     setIsAiSpeaking(false);
   }, []);
 
   const toggleMute = () => setIsMuted(!isMuted);
 
-  return { connect, disconnect, toggleMute, isMuted, isAiSpeaking, status, volume, transcript };
+  return { checkMic, playTestSound, connect, disconnect, toggleMute, isMuted, isAiSpeaking, status, volume, transcript, connectionLogs };
 };

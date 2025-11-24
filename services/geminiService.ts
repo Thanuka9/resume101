@@ -1,27 +1,23 @@
+
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis, TranscriptItem, InterviewFeedback } from "../types";
 
-/**
- * Helper to extract JSON from markdown code blocks or raw text
- */
 const cleanAndParseJSON = (text: string) => {
   try {
-    // 1. Try removing markdown code blocks
     let cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    // Remove any text before the first '{' and after the last '}'
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1) {
+       cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    }
     return JSON.parse(cleaned);
   } catch (e) {
-    // 2. If that fails, try extracting the first { ... } object
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      return JSON.parse(match[0]);
-    }
-    throw new Error("Failed to parse JSON response");
+    console.error("JSON Parse Error", e);
+    throw new Error("Failed to parse JSON response from AI");
   }
 };
 
-/**
- * AGENT ALPHA: Technical Resume Architect
- */
 export const analyzeResumeDeep = async (
   input: { base64Data?: string; mimeType?: string; text?: string },
   targetRole: string
@@ -37,7 +33,7 @@ export const analyzeResumeDeep = async (
       contents: {
         parts: [
           { inlineData: { mimeType: input.mimeType, data: input.base64Data } },
-          { text: "Transcribe the text from this document exactly, maintaining the structure where possible. Do not summarize." }
+          { text: "Transcribe the text from this document exactly. Do not summarize." }
         ]
       }
     });
@@ -49,107 +45,114 @@ export const analyzeResumeDeep = async (
     properties: {
       candidateName: { type: Type.STRING },
       currentTitle: { type: Type.STRING },
-      executiveSummary: { type: Type.STRING, description: "Detailed 3-4 sentence assessment of engineering capability and level." },
-      detectedTechStack: { type: Type.ARRAY, items: { type: Type.STRING } },
+      executiveSummary: { type: Type.STRING },
+      detectedTechStack: { 
+        type: Type.ARRAY, 
+        items: { 
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            importance: { type: Type.STRING }
+          }
+        } 
+      },
+      hiringVerdict: { type: Type.STRING, enum: ["Strong No Hire", "No Hire", "Leaning No Hire", "Leaning Hire", "Hire", "Strong Hire"] },
       scores: {
         type: Type.OBJECT,
         properties: {
           atsCompatibility: { type: Type.NUMBER },
-          engineeringImpact: { type: Type.NUMBER, description: "Score based on 'Action -> Metric -> Result' pattern." },
-          techStackRelevance: { type: Type.NUMBER, description: "Match against modern industry standards for the role." },
+          engineeringImpact: { type: Type.NUMBER },
+          techStackRelevance: { type: Type.NUMBER },
         },
         required: ["atsCompatibility", "engineeringImpact", "techStackRelevance"]
       },
+      greenFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
       criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
       improvementPlan: { 
         type: Type.ARRAY, 
         items: { 
           type: Type.OBJECT,
           properties: {
-            action: { type: Type.STRING, description: "The specific action to take." },
+            action: { type: Type.STRING },
             priority: { type: Type.STRING, enum: ["High", "Medium", "Low"] },
-            example: { type: Type.STRING, description: "A concrete example of how to implement this." }
+            example: { type: Type.STRING }
           }
-        }, 
-        description: "A comprehensive strategic plan with at least 5 prioritized items." 
+        }
       },
       rewrites: {
         type: Type.ARRAY,
         items: {
           type: Type.OBJECT,
           properties: {
+            section: { type: Type.STRING },
             original: { type: Type.STRING },
             improved: { type: Type.STRING },
             rationale: { type: Type.STRING },
           }
         }
       },
-      marketLevel: { type: Type.STRING, description: "Junior, Mid-Level, Senior, Staff, Principal" }
+      marketLevel: { type: Type.STRING }
     },
-    required: ["candidateName", "currentTitle", "executiveSummary", "detectedTechStack", "scores", "criticalGaps", "improvementPlan", "rewrites", "marketLevel"]
+    required: ["candidateName", "currentTitle", "executiveSummary", "detectedTechStack", "hiringVerdict", "scores", "greenFlags", "criticalGaps", "improvementPlan", "rewrites", "marketLevel"]
   };
 
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-preview",
     contents: `
-      You are Agent Alpha, a Technical Recruiter for a top-tier tech company.
+      You are Agent Alpha, a Senior Technical Recruiter.
       Target Role: ${targetRole}
+      Resume Text: ${rawResumeData}
       
-      Resume Content:
-      ${rawResumeData}
-
-      Your Task:
-      1. Evaluate this candidate specifically for a **Technical Role**. 
-      2. Identify "Red Flags" and "Critical Gaps".
-      3. Create a **Structured Improvement Plan**. For each item, assign a Priority and give a SPECIFIC Example (e.g., "Change 'Managed database' to 'Optimized PostgreSQL queries reducing latency by 40%'").
-      4. Rewrite bullet points to emphasize **engineering impact**.
+      Task:
+      1. Provide a hiring verdict.
+      2. Rewrite weak bullet points to be "Action + Metric + Result".
+      3. Identify critical gaps for the role.
+      4. Create a strategic improvement plan.
+      5. Identify tech stack and explain why each skill is important for this role.
     `,
     config: {
       responseMimeType: "application/json",
       responseSchema: analysisSchema,
-      thinkingConfig: { thinkingBudget: 4096 }
+      thinkingConfig: { thinkingBudget: 8192 }
     }
   });
 
   if (!response.text) throw new Error("Agent Alpha failed.");
-  return cleanAndParseJSON(response.text) as ResumeAnalysis;
+  const result = cleanAndParseJSON(response.text) as ResumeAnalysis;
+  result.rawText = rawResumeData;
+  return result;
 };
 
-/**
- * AGENT BRAVO: Tech Market Scout
- */
 export const scoutMarket = async (
   query: string,
   location: string
 ): Promise<MarketReport> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
+  // Note: Cannot use responseSchema with tools: [googleSearch]
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-preview",
     contents: `
       You are Agent Bravo, a Tech Compensation Analyst.
+      Research market for: "${query}" in "${location}".
       
-      Task: Research the market for: "${query}" in "${location}".
-      
-      1. Use Google Search to find real-time data from sources like Levels.fyi, Glassdoor, LinkedIn.
-      2. Find **Total Compensation (TC)** numbers. Return purely NUMERIC values for the salary fields (no currency symbols or commas in the numbers, just raw integers).
-      3. Identify key hiring trends (technologies, methodologies) and assign a 'demandScore' (1-10) to each.
-      4. Find 3-5 active or recent job listings relevant to this role in this location from the search results.
-      
-      Output JSON format:
+      Output strict JSON (no markdown) matching this structure:
       {
-        "roleOverview": "string",
-        "compensationBreakdown": { 
-          "baseSalary": number (average annual base), 
-          "equity": number (average annual equity value), 
-          "signOnBonus": number (average sign on), 
-          "totalComp": number (sum of above), 
-          "currency": "string (e.g. USD, GBP, LKR)" 
+        "roleOverview": "string (brief market summary)",
+        "compensationBreakdown": {
+          "baseSalary": number (Median Annual Base Salary),
+          "equity": number (Median Annual Equity Value, 0 if not common),
+          "signOnBonus": number (Median Sign-on, 0 if not common),
+          "totalComp": number (Total Annual Compensation),
+          "currency": "string (e.g. USD, GBP, LKR, etc.)"
         },
-        "negotiationPoints": ["string"],
+        "salaryPercentile": number (0-100, where this totalComp falls in market),
+        "costOfLivingAnalysis": "string (1 sentence context: e.g. 'Comfortable for single, tight for family')",
+        "negotiationScript": "string (A specific 2-3 sentence email script to ask for more money based on this data)",
+        "negotiationPoints": ["string (leverage points)"],
         "hiringTrends": [{ "trend": "string", "demandScore": number (1-10) }],
         "jobListings": [{ "title": "string", "company": "string", "location": "string", "description": "string" }],
-        "topTechHubs": ["string"]
+        "topTechHubs": ["string (Cities/Regions with high demand for this role)"]
       }
     `,
     config: {
@@ -165,9 +168,6 @@ export const scoutMarket = async (
   return { ...data, sources };
 };
 
-/**
- * AGENT DELTA: Engineering Portfolio Auditor
- */
 export const analyzePortfolio = async (
   url: string,
   description: string,
@@ -175,52 +175,61 @@ export const analyzePortfolio = async (
 ): Promise<PortfolioAnalysis> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-  const schema: Schema = {
-    type: Type.OBJECT,
-    properties: {
-      overallGrade: { type: Type.STRING },
-      hiringDecision: { type: Type.STRING },
-      technicalSuperpower: { type: Type.STRING },
-      missingEngineeringPractices: { type: Type.ARRAY, items: { type: Type.STRING } },
-      holisticAdvice: { type: Type.ARRAY, items: { type: Type.STRING } },
-      projects: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            projectName: { type: Type.STRING },
-            impactScore: { type: Type.NUMBER },
-            codeQualityScore: { type: Type.NUMBER },
-            techStack: { type: Type.ARRAY, items: { type: Type.STRING } },
-            critique: { type: Type.STRING, description: "Detailed technical critique (4-5 sentences)." },
-            improvement: { type: Type.STRING, description: "Specific technical instruction." },
-            codeSnippet: { type: Type.STRING, description: "A code block illustrating the improvement or the correct pattern (e.g. correct usage of useEffect, or a Dockerfile snippet). Mark it with language like 'typescript' or 'python'." }
-          }
-        }
-      }
-    },
-    required: ["overallGrade", "hiringDecision", "technicalSuperpower", "missingEngineeringPractices", "projects", "holisticAdvice"]
-  };
-
+  // Note: Cannot use responseSchema with tools: [googleSearch]
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-preview",
     contents: `
-      You are Agent Delta, a Principal Engineer.
-      Target Role: ${targetRole}
-      
-      Input: 
+      You are Agent Delta, a Principal Engineer & Hiring Manager.
+      Role Context: ${targetRole}
       URL: ${url}
       Context: ${description}
+      
+      TASK: Perform a HOLISTIC Audit of this Candidate.
+      Usage of Google Search is MANDATORY. Do not just look at the landing page.
+      If it is a GitHub profile, search for their popular repositories and read code.
+      If it is a Personal Site, search for their linked projects, LinkedIn, or About pages.
 
-      Your Task:
-      1. Audit this portfolio for **Engineering Competence**.
-      2. Provide **Extensive** feedback.
-      3. For each project, provide a **Code Snippet** (pseudocode or actual code) that shows how to fix a flaw or implement a missing best practice (e.g. adding error handling, typing a response, optimizing a query).
+      CRITIQUE ALL ASPECTS:
+      1. ENGINEERING (Code): Code quality, architecture, testing, CI/CD, documentation.
+      2. WORK EXPERIENCE: How is their history presented? Is it impact-driven or just a list of duties?
+      3. EDUCATION: How is their academic background leveraged? (Degrees, Certs, Research).
+      4. PERSONAL BRAND: Bio quality, contact info clarity, professional narrative.
+      
+      Output strict JSON (no markdown) with this structure:
+      {
+        "overallGrade": "string (A-F)",
+        "hiringDecision": "string",
+        "technicalSuperpower": "string",
+        "brandAnalysis": {
+            "careerNarrativeScore": number (0-100),
+            "visualStorytellingScore": number (0-100),
+            "experiencePresentation": "string",
+            "personalBrandCritique": "string",
+            "educationCritique": "string"
+        },
+        "missingEngineeringPractices": ["string"],
+        "holisticAdvice": ["string"],
+        "skillRadar": {
+          "architecture": number (0-100),
+          "codeStyle": number (0-100),
+          "testing": number (0-100),
+          "documentation": number (0-100),
+          "innovation": number (0-100)
+        },
+        "projects": [{
+            "projectName": "string",
+            "impactScore": number,
+            "codeQualityScore": number,
+            "techStack": ["string"],
+            "critique": "string (detailed)",
+            "improvement": "string (actionable)",
+            "codeSnippet": "string (pseudocode or specific fix)"
+        }]
+      }
     `,
     config: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      thinkingConfig: { thinkingBudget: 4096 }
+      thinkingConfig: { thinkingBudget: 8192 },
+      tools: [{ googleSearch: {} }]
     }
   });
 
@@ -228,45 +237,32 @@ export const analyzePortfolio = async (
   return cleanAndParseJSON(response.text) as PortfolioAnalysis;
 };
 
-/**
- * Generate Interview Questions based on role
- */
 export const generateInterviewQuestions = async (role: string): Promise<string[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
-    contents: `Generate 5 common but challenging technical interview questions for a ${role} position. Return them as a simple JSON array of strings.`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.ARRAY,
-        items: { type: Type.STRING }
-      }
-    }
+    contents: `Generate 5 challenging technical interview questions for a ${role}. Return JSON array of strings.`,
+    config: { responseMimeType: "application/json", responseSchema: { type: Type.ARRAY, items: { type: Type.STRING } } }
   });
-
-  if (!response.text) return ["Tell me about yourself.", "What is your greatest strength?", "Describe a challenge you faced."];
+  if (!response.text) return ["Tell me about yourself."];
   return cleanAndParseJSON(response.text) as string[];
 };
 
-/**
- * Generate Interview Feedback Report
- */
 export const generateInterviewFeedback = async (
   transcript: TranscriptItem[],
   role: string
 ): Promise<InterviewFeedback> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
   const formattedTranscript = transcript.map(t => `${t.speaker.toUpperCase()}: ${t.text}`).join('\n');
 
   const schema: Schema = {
     type: Type.OBJECT,
     properties: {
-      overallScore: { type: Type.NUMBER, description: "Score out of 100" },
+      overallScore: { type: Type.NUMBER },
       technicalAccuracy: { type: Type.STRING },
+      technicalAccuracyScore: { type: Type.NUMBER },
       communicationClarity: { type: Type.STRING },
+      communicationClarityScore: { type: Type.NUMBER },
       keyStrengths: { type: Type.ARRAY, items: { type: Type.STRING } },
       areasForImprovement: { type: Type.ARRAY, items: { type: Type.STRING } },
       detailedFeedback: {
@@ -276,31 +272,22 @@ export const generateInterviewFeedback = async (
           properties: {
             category: { type: Type.STRING, enum: ["Strength", "Improvement"] },
             observation: { type: Type.STRING },
-            quote: { type: Type.STRING, description: "Exact quote from transcript" }
+            quote: { type: Type.STRING }
           }
-        },
-        description: "Specific evidence from the conversation supporting the grade."
+        }
       },
       hiringRecommendation: { type: Type.STRING, enum: ["Strong No Hire", "No Hire", "Leaning No Hire", "Leaning Hire", "Hire", "Strong Hire"] }
     },
-    required: ["overallScore", "technicalAccuracy", "communicationClarity", "keyStrengths", "areasForImprovement", "detailedFeedback", "hiringRecommendation"]
+    required: ["overallScore", "technicalAccuracy", "technicalAccuracyScore", "communicationClarity", "communicationClarityScore", "keyStrengths", "areasForImprovement", "detailedFeedback", "hiringRecommendation"]
   };
 
   const response = await ai.models.generateContent({
     model: "gemini-3-pro-preview",
     contents: `
-      You are a Bar Raiser at a FAANG company. 
-      Review this interview transcript for a ${role} position.
+      Evaluate interview transcript for ${role}.
+      Transcript: ${formattedTranscript}
       
-      Transcript:
-      ${formattedTranscript}
-      
-      Evaluate the candidate's performance based on:
-      1. Technical Correctness (Did they know the answers?)
-      2. Communication (Were they concise? Did they ramble?)
-      3. Signal (Is there evidence of seniority?)
-      
-      Critically, you MUST cite specific parts of the transcript in 'detailedFeedback' to justify your score.
+      Score specifically on technical correctness and communication.
     `,
     config: {
       responseMimeType: "application/json",

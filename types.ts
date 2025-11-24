@@ -1,3 +1,4 @@
+
 import { Modality } from "@google/genai";
 
 export enum ActiveTab {
@@ -7,7 +8,7 @@ export enum ActiveTab {
   PORTFOLIO = 'PORTFOLIO',
 }
 
-export type InterviewStatus = 'idle' | 'connecting' | 'active' | 'error';
+export type InterviewStatus = 'idle' | 'mic-check' | 'connecting' | 'active' | 'error' | 'finished';
 export type InterviewPersona = 'Junior Peer' | 'Senior Engineer' | 'Staff Architect' | 'Tech Lead' | 'Hiring Manager';
 
 // --- Agent Schemas ---
@@ -18,19 +19,28 @@ export interface ResumeImprovement {
   example: string;
 }
 
+export interface DetectedSkill {
+  name: string;
+  importance: string;
+}
+
 export interface ResumeAnalysis {
   candidateName: string;
   currentTitle: string;
   executiveSummary: string;
-  detectedTechStack: string[];
+  detectedTechStack: DetectedSkill[];
+  hiringVerdict: "Strong No Hire" | "No Hire" | "Leaning No Hire" | "Leaning Hire" | "Hire" | "Strong Hire";
+  rawText?: string;
   scores: {
     atsCompatibility: number;
     engineeringImpact: number;
     techStackRelevance: number;
   };
+  greenFlags: string[];
   criticalGaps: string[];
-  improvementPlan: ResumeImprovement[]; // Updated to structured object
+  improvementPlan: ResumeImprovement[];
   rewrites: {
+    section: string;
     original: string;
     improved: string;
     rationale: string;
@@ -55,15 +65,18 @@ export interface JobListing {
 export interface MarketReport {
   roleOverview: string;
   compensationBreakdown: {
-    baseSalary: number; // Changed to number for charts
-    equity: number;     // Changed to number for charts
-    signOnBonus: number; // Changed to number for charts
-    totalComp: number;   // Changed to number for charts
+    baseSalary: number;
+    equity: number;
+    signOnBonus: number;
+    totalComp: number;
     currency: string;
   };
+  salaryPercentile: number; // 0-100
+  costOfLivingAnalysis: string; // "High", "Medium", "Low" context
+  negotiationScript: string;
   negotiationPoints: string[];
-  hiringTrends: { trend: string; demandScore: number }[]; // Updated for Tag Cloud
-  jobListings: JobListing[]; // New: Job Search Results
+  hiringTrends: { trend: string; demandScore: number }[];
+  jobListings: JobListing[];
   topTechHubs: string[];
   sources: GroundingSource[];
 }
@@ -75,20 +88,34 @@ export interface PortfolioProject {
   techStack: string[];
   critique: string;
   improvement: string;
-  codeSnippet: string; // New: Code example or Pseudocode
+  codeSnippet: string;
 }
 
 export interface PortfolioAnalysis {
   overallGrade: string;
   hiringDecision: string;
   technicalSuperpower: string;
-  projects: PortfolioProject[];
+  brandAnalysis: {
+    careerNarrativeScore: number;
+    visualStorytellingScore: number;
+    experiencePresentation: string;
+    personalBrandCritique: string;
+    educationCritique: string;
+  };
   missingEngineeringPractices: string[];
   holisticAdvice: string[];
+  skillRadar: {
+    architecture: number;
+    codeStyle: number;
+    testing: number;
+    documentation: number;
+    innovation: number;
+  };
+  projects: PortfolioProject[];
 }
 
 export interface TranscriptItem {
-  speaker: 'user' | 'ai';
+  speaker: 'user' | 'ai' | 'system';
   text: string;
   timestamp: string;
 }
@@ -102,9 +129,11 @@ export interface InterviewFeedbackDetail {
 export interface InterviewFeedback {
   overallScore: number;
   technicalAccuracy: string;
+  technicalAccuracyScore: number;
   communicationClarity: string;
+  communicationClarityScore: number;
   keyStrengths: string[];
   areasForImprovement: string[];
-  detailedFeedback: InterviewFeedbackDetail[]; // New: Specific evidence
+  detailedFeedback: InterviewFeedbackDetail[];
   hiringRecommendation: "Strong No Hire" | "No Hire" | "Leaning No Hire" | "Leaning Hire" | "Hire" | "Strong Hire";
 }
