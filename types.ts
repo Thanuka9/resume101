@@ -1,4 +1,5 @@
 
+
 import { Modality } from "@google/genai";
 
 export enum ActiveTab {
@@ -118,6 +119,7 @@ export interface TranscriptItem {
   speaker: 'user' | 'ai' | 'system';
   text: string;
   timestamp: string;
+  isComplete?: boolean;
 }
 
 export interface InterviewFeedbackDetail {

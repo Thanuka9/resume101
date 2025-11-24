@@ -1,4 +1,5 @@
 
+
 import { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { InterviewStatus, InterviewPersona, TranscriptItem } from '../types';
@@ -202,14 +203,68 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
             processor.connect(inputContextRef.current!.destination); // Keep alive
           },
           onmessage: async (msg: LiveServerMessage) => {
-            if (msg.serverContent?.outputTranscription?.text) {
-               setTranscript(p => [...p, { speaker: 'ai', text: msg.serverContent?.outputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+            const serverContent = msg.serverContent;
+            
+            // Handle Transcription Streaming
+            if (serverContent?.outputTranscription?.text) {
+               const text = serverContent.outputTranscription.text;
+               setTranscript(prev => {
+                  if (prev.length > 0) {
+                     const last = prev[prev.length - 1];
+                     if (last.speaker === 'ai' && !last.isComplete) {
+                        // Append to existing AI turn
+                        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                     }
+                  }
+                  // Start new AI turn
+                  return [...prev, { speaker: 'ai', text, timestamp: new Date().toLocaleTimeString(), isComplete: false }];
+               });
             }
-            if (msg.serverContent?.inputTranscription?.text) {
-               setTranscript(p => [...p, { speaker: 'user', text: msg.serverContent?.inputTranscription?.text || '', timestamp: new Date().toLocaleTimeString() }]);
+            
+            if (serverContent?.inputTranscription?.text) {
+               const text = serverContent.inputTranscription.text;
+               setTranscript(prev => {
+                  if (prev.length > 0) {
+                     const last = prev[prev.length - 1];
+                     if (last.speaker === 'user' && !last.isComplete) {
+                        // Append to existing User turn
+                        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                     }
+                  }
+                  // Start new User turn
+                  return [...prev, { speaker: 'user', text, timestamp: new Date().toLocaleTimeString(), isComplete: false }];
+               });
             }
 
-            const data = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (serverContent?.turnComplete) {
+               setTranscript(prev => {
+                   if (prev.length === 0) return prev;
+                   const last = prev[prev.length - 1];
+                   return [...prev.slice(0, -1), { ...last, isComplete: true }];
+               });
+            }
+
+            if (serverContent?.interrupted) {
+                // Clear audio queue
+                for (const source of sourceNodesRef.current) {
+                    source.stop();
+                }
+                sourceNodesRef.current.clear();
+                nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+                
+                // Mark current turn as complete/interrupted
+                setTranscript(prev => {
+                    if (prev.length === 0) return prev;
+                    const last = prev[prev.length - 1];
+                    if (last.speaker === 'ai') {
+                         return [...prev.slice(0, -1), { ...last, isComplete: true }];
+                    }
+                    return prev;
+                });
+            }
+
+            // Handle Audio Output
+            const data = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (data && audioContextRef.current) {
               const buffer = await decodeAudioData(data, audioContextRef.current);
               const source = audioContextRef.current.createBufferSource();
