@@ -116,6 +116,7 @@ export interface PortfolioAnalysis {
 }
 
 export interface TranscriptItem {
+  id: string;
   speaker: 'user' | 'ai' | 'system';
   text: string;
   timestamp: string;

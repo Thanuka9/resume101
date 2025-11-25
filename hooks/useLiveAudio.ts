@@ -1,6 +1,4 @@
-
-
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { InterviewStatus, InterviewPersona, TranscriptItem } from '../types';
 
@@ -14,6 +12,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
   const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
   const [connectionLogs, setConnectionLogs] = useState<string[]>([]);
   
+  // Refs for audio and state management
   const audioContextRef = useRef<AudioContext | null>(null);
   const inputContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -21,8 +20,15 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
   const nextStartTimeRef = useRef<number>(0);
   const sourceNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const checkIntervalRef = useRef<any>(null);
+  const isMutedRef = useRef(isMuted);
+
+  // Keep ref in sync with state for callbacks
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
 
   const addLog = (msg: string) => setConnectionLogs(prev => [...prev.slice(-4), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  const generateId = () => Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
 
   // --- Helpers ---
   const createBlob = (data: Float32Array) => {
@@ -31,7 +37,8 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
     for (let i = 0; i < l; i++) int16[i] = data[i] * 32768;
     const uint8 = new Uint8Array(int16.buffer);
     let binary = '';
-    for (let i = 0; i < uint8.byteLength; i++) binary += String.fromCharCode(uint8[i]);
+    const len = uint8.byteLength;
+    for (let i = 0; i < len; i++) binary += String.fromCharCode(uint8[i]);
     return { data: btoa(binary), mimeType: 'audio/pcm;rate=16000' };
   };
 
@@ -75,7 +82,14 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
        stopCheckLoop();
        setConnectionLogs([]);
        addLog("Requesting Mic Access...");
-       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+       // Enable echo cancellation and noise suppression for better transcription
+       const stream = await navigator.mediaDevices.getUserMedia({ 
+           audio: { 
+               echoCancellation: true, 
+               noiseSuppression: true, 
+               autoGainControl: true 
+           } 
+       });
        addLog("Mic Access Granted");
        setStatus('mic-check');
        
@@ -150,7 +164,13 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
       let stream = streamRef.current;
       if (!stream || !stream.active) {
          addLog("Re-acquiring Mic...");
-         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+         stream = await navigator.mediaDevices.getUserMedia({ 
+             audio: { 
+                 echoCancellation: true, 
+                 noiseSuppression: true, 
+                 autoGainControl: true
+             } 
+         });
          streamRef.current = stream;
       }
 
@@ -193,7 +213,8 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
               setVolume(Math.sqrt(sum / inputData.length));
 
-              if (!isMuted) {
+              // Check ref instead of state to avoid stale closure
+              if (!isMutedRef.current) {
                  const blob = createBlob(inputData);
                  sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: blob }));
               }
@@ -205,62 +226,76 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
           onmessage: async (msg: LiveServerMessage) => {
             const serverContent = msg.serverContent;
             
-            // Handle Transcription Streaming
-            if (serverContent?.outputTranscription?.text) {
-               const text = serverContent.outputTranscription.text;
-               setTranscript(prev => {
-                  if (prev.length > 0) {
-                     const last = prev[prev.length - 1];
-                     if (last.speaker === 'ai' && !last.isComplete) {
-                        // Append to existing AI turn
-                        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
-                     }
-                  }
-                  // Start new AI turn
-                  return [...prev, { speaker: 'ai', text, timestamp: new Date().toLocaleTimeString(), isComplete: false }];
-               });
-            }
-            
-            if (serverContent?.inputTranscription?.text) {
-               const text = serverContent.inputTranscription.text;
-               setTranscript(prev => {
-                  if (prev.length > 0) {
-                     const last = prev[prev.length - 1];
-                     if (last.speaker === 'user' && !last.isComplete) {
-                        // Append to existing User turn
-                        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
-                     }
-                  }
-                  // Start new User turn
-                  return [...prev, { speaker: 'user', text, timestamp: new Date().toLocaleTimeString(), isComplete: false }];
-               });
-            }
+            // Atomic update to transcript to prevent out-of-order fragmentation
+            setTranscript(currentTranscript => {
+              let newTranscript = [...currentTranscript];
+              const getLast = () => newTranscript.length > 0 ? newTranscript[newTranscript.length - 1] : null;
 
-            if (serverContent?.turnComplete) {
-               setTranscript(prev => {
-                   if (prev.length === 0) return prev;
-                   const last = prev[prev.length - 1];
-                   return [...prev.slice(0, -1), { ...last, isComplete: true }];
-               });
-            }
+              // 1. Handle Model Speech (Output)
+              if (serverContent?.outputTranscription?.text) {
+                const text = serverContent.outputTranscription.text;
+                // Avoid creating bubbles for empty strings
+                if (text && text.length > 0) {
+                    const last = getLast();
+                    if (last && last.speaker === 'ai' && !last.isComplete) {
+                        newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
+                    } else {
+                        // If switching from user to AI, mark user done
+                        if (last && last.speaker === 'user' && !last.isComplete) {
+                            newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
+                        }
+                        newTranscript.push({
+                            id: generateId(),
+                            speaker: 'ai',
+                            text,
+                            timestamp: new Date().toLocaleTimeString(),
+                            isComplete: false
+                        });
+                    }
+                }
+              }
+              
+              // 2. Handle User Speech (Input)
+              if (serverContent?.inputTranscription?.text) {
+                const text = serverContent.inputTranscription.text;
+                if (text && text.length > 0) {
+                    const last = getLast(); // Get potentially updated last from step 1
+                    if (last && last.speaker === 'user' && !last.isComplete) {
+                        newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
+                    } else {
+                        // If switching from AI to user, mark AI done
+                        if (last && last.speaker === 'ai' && !last.isComplete) {
+                            newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
+                        }
+                        newTranscript.push({
+                            id: generateId(),
+                            speaker: 'user',
+                            text,
+                            timestamp: new Date().toLocaleTimeString(),
+                            isComplete: false
+                        });
+                    }
+                }
+              }
+
+              // 3. Handle Turn Completion & Interruptions
+              if (serverContent?.turnComplete || serverContent?.interrupted) {
+                 const last = getLast();
+                 if (last && !last.isComplete) {
+                    newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
+                 }
+              }
+
+              return newTranscript;
+            });
 
             if (serverContent?.interrupted) {
-                // Clear audio queue
+                // Clear audio queue immediately
                 for (const source of sourceNodesRef.current) {
                     source.stop();
                 }
                 sourceNodesRef.current.clear();
                 nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
-                
-                // Mark current turn as complete/interrupted
-                setTranscript(prev => {
-                    if (prev.length === 0) return prev;
-                    const last = prev[prev.length - 1];
-                    if (last.speaker === 'ai') {
-                         return [...prev.slice(0, -1), { ...last, isComplete: true }];
-                    }
-                    return prev;
-                });
             }
 
             // Handle Audio Output
@@ -291,7 +326,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
       setStatus('error');
       addLog("Connection Failed");
     }
-  }, [role, persona, userContext, isMuted]);
+  }, [role, persona, userContext]); // Removed isMuted from dependency array as it's handled via Ref
 
   const disconnect = useCallback(() => {
     stopCheckLoop();

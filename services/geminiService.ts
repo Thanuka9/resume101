@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis, TranscriptItem, InterviewFeedback } from "../types";
 
@@ -20,7 +19,8 @@ const cleanAndParseJSON = (text: string) => {
 
 export const analyzeResumeDeep = async (
   input: { base64Data?: string; mimeType?: string; text?: string },
-  targetRole: string
+  targetRole: string,
+  useEconomyMode: boolean = true
 ): Promise<ResumeAnalysis> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   let rawResumeData = "";
@@ -96,8 +96,18 @@ export const analyzeResumeDeep = async (
     required: ["candidateName", "currentTitle", "executiveSummary", "detectedTechStack", "hiringVerdict", "scores", "greenFlags", "criticalGaps", "improvementPlan", "rewrites", "marketLevel"]
   };
 
+  const model = useEconomyMode ? "gemini-2.5-flash" : "gemini-3-pro-preview";
+  const config: any = {
+    responseMimeType: "application/json",
+    responseSchema: analysisSchema,
+  };
+
+  // Enable Thinking Config for both.
+  // Economy: 4096 (Free limit friendly). Pro: 8192 (Deep thought).
+  config.thinkingConfig = { thinkingBudget: useEconomyMode ? 4096 : 8192 };
+
   const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
+    model: model,
     contents: `
       You are Agent Alpha, a Senior Technical Recruiter.
       Target Role: ${targetRole}
@@ -110,11 +120,7 @@ export const analyzeResumeDeep = async (
       4. Create a strategic improvement plan.
       5. Identify tech stack and explain why each skill is important for this role.
     `,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: analysisSchema,
-      thinkingConfig: { thinkingBudget: 8192 }
-    }
+    config: config
   });
 
   if (!response.text) throw new Error("Agent Alpha failed.");
@@ -125,16 +131,31 @@ export const analyzeResumeDeep = async (
 
 export const scoutMarket = async (
   query: string,
-  location: string
+  location: string,
+  useEconomyMode: boolean = true
 ): Promise<MarketReport> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  // Note: Cannot use responseSchema with tools: [googleSearch]
+  const model = useEconomyMode ? "gemini-2.5-flash" : "gemini-3-pro-preview";
+  
+  // Economy mode uses internal knowledge instead of live search to save money
+  const tools = useEconomyMode ? undefined : [{ googleSearch: {} }];
+  
+  const prompt = useEconomyMode 
+    ? `You are Agent Bravo, a Tech Compensation Analyst. 
+       Estimate market data based on your internal knowledge (acting as a cached database) for: "${query}" in "${location}".
+       Do NOT search the web. Use your training data as the source of truth.`
+    : `You are Agent Bravo, a Tech Compensation Analyst.
+       Research live market data for: "${query}" in "${location}".`;
+
+  const config: any = { tools };
+  // Enable thinking for better estimation in economy mode too
+  config.thinkingConfig = { thinkingBudget: useEconomyMode ? 2048 : 8192 };
+
   const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
+    model: model,
     contents: `
-      You are Agent Bravo, a Tech Compensation Analyst.
-      Research market for: "${query}" in "${location}".
+      ${prompt}
       
       Output strict JSON (no markdown) matching this structure:
       {
@@ -155,9 +176,7 @@ export const scoutMarket = async (
         "topTechHubs": ["string (Cities/Regions with high demand for this role)"]
       }
     `,
-    config: {
-      tools: [{ googleSearch: {} }]
-    }
+    config: config
   });
 
   const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks
@@ -171,24 +190,39 @@ export const scoutMarket = async (
 export const analyzePortfolio = async (
   url: string,
   description: string,
-  targetRole: string
+  targetRole: string,
+  useEconomyMode: boolean = true
 ): Promise<PortfolioAnalysis> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const model = useEconomyMode ? "gemini-2.5-flash" : "gemini-3-pro-preview";
+  // Disable search in economy to save cost
+  const tools = useEconomyMode ? undefined : [{ googleSearch: {} }];
+  const config: any = { tools };
+  
+  // Keep thinking active in Economy mode for better analysis of the provided text
+  config.thinkingConfig = { thinkingBudget: useEconomyMode ? 4096 : 8192 };
 
-  // Note: Cannot use responseSchema with tools: [googleSearch]
+  const prompt = useEconomyMode 
+    ? `You are Agent Delta, a Principal Engineer & Hiring Manager.
+       Role Context: ${targetRole}
+       URL Provided: ${url} (Note: You cannot browse this URL in Economy Mode. Rely ONLY on the User Context below).
+       User Context: ${description}
+       
+       TASK: Perform a HOLISTIC Audit based on the description provided. Assume the description accurately reflects the portfolio.`
+    : `You are Agent Delta, a Principal Engineer & Hiring Manager.
+       Role Context: ${targetRole}
+       URL: ${url}
+       Context: ${description}
+       
+       TASK: Perform a HOLISTIC Audit of this Candidate.
+       Usage of Google Search is MANDATORY. Do not just look at the landing page.`;
+
   const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
+    model: model,
     contents: `
-      You are Agent Delta, a Principal Engineer & Hiring Manager.
-      Role Context: ${targetRole}
-      URL: ${url}
-      Context: ${description}
+      ${prompt}
       
-      TASK: Perform a HOLISTIC Audit of this Candidate.
-      Usage of Google Search is MANDATORY. Do not just look at the landing page.
-      If it is a GitHub profile, search for their popular repositories and read code.
-      If it is a Personal Site, search for their linked projects, LinkedIn, or About pages.
-
       CRITIQUE ALL ASPECTS:
       1. ENGINEERING (Code): Code quality, architecture, testing, CI/CD, documentation.
       2. WORK EXPERIENCE: How is their history presented? Is it impact-driven or just a list of duties?
@@ -227,10 +261,7 @@ export const analyzePortfolio = async (
         }]
       }
     `,
-    config: {
-      thinkingConfig: { thinkingBudget: 8192 },
-      tools: [{ googleSearch: {} }]
-    }
+    config: config
   });
 
   if (!response.text) throw new Error("Agent Delta failed.");
@@ -250,10 +281,13 @@ export const generateInterviewQuestions = async (role: string): Promise<string[]
 
 export const generateInterviewFeedback = async (
   transcript: TranscriptItem[],
-  role: string
+  role: string,
+  useEconomyMode: boolean = true
 ): Promise<InterviewFeedback> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const formattedTranscript = transcript.map(t => `${t.speaker.toUpperCase()}: ${t.text}`).join('\n');
+
+  const model = useEconomyMode ? "gemini-2.5-flash" : "gemini-3-pro-preview";
 
   const schema: Schema = {
     type: Type.OBJECT,
@@ -280,20 +314,24 @@ export const generateInterviewFeedback = async (
     },
     required: ["overallScore", "technicalAccuracy", "technicalAccuracyScore", "communicationClarity", "communicationClarityScore", "keyStrengths", "areasForImprovement", "detailedFeedback", "hiringRecommendation"]
   };
+  
+  const config: any = {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+  }
+
+  // Thinking enabled for both modes to ensure high quality feedback
+  config.thinkingConfig = { thinkingBudget: useEconomyMode ? 4096 : 8192 };
 
   const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview",
+    model: model,
     contents: `
       Evaluate interview transcript for ${role}.
       Transcript: ${formattedTranscript}
       
       Score specifically on technical correctness and communication.
     `,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      thinkingConfig: { thinkingBudget: 4096 }
-    }
+    config: config
   });
 
   if (!response.text) throw new Error("Feedback generation failed.");

@@ -97,10 +97,26 @@ const GaugeChart = ({ score, label }: { score: number, label: string }) => {
     );
 };
 
+const DataSourceBadge = ({ source, timestamp }: { source: 'live' | 'cache' | 'estimate', timestamp?: number }) => {
+    const dateStr = timestamp ? new Date(timestamp).toLocaleDateString() : '';
+    if (source === 'live') {
+        return <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/20 text-purple-300 text-xs font-bold border border-purple-500/50">🟢 Live Real-Time Data (Just Updated)</div>;
+    }
+    if (source === 'cache') {
+        return <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/50">📅 Data from {dateStr}</div>;
+    }
+    return <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-700 text-slate-300 text-xs font-bold border border-slate-600">⚡ AI Estimate (No Cache)</div>;
+};
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>(ActiveTab.RESUME);
   const [resumeData, setResumeData] = useState<ResumeAnalysis | null>(null);
+  
+  // Market State
   const [marketReport, setMarketReport] = useState<MarketReport | null>(null);
+  const [marketDataSource, setMarketDataSource] = useState<'live' | 'cache' | 'estimate'>('estimate');
+  const [marketDataTimestamp, setMarketDataTimestamp] = useState<number | undefined>(undefined);
+
   const [portfolioData, setPortfolioData] = useState<PortfolioAnalysis | null>(null);
   const [interviewFeedback, setInterviewFeedback] = useState<InterviewFeedback | null>(null);
   
@@ -162,8 +178,12 @@ const App: React.FC = () => {
     setResumeData(null);
     setAnalysisStep("Extracting...");
     try {
-      setTimeout(() => setAnalysisStep("Analyzing Impact..."), 2000);
-      const data = await analyzeResumeDeep(dictatedText ? { text: dictatedText } : { base64Data: resumeFile?.data, mimeType: resumeFile?.mimeType }, targetRole);
+      setTimeout(() => setAnalysisStep("Analyzing..."), 1000);
+      const data = await analyzeResumeDeep(
+          dictatedText ? { text: dictatedText } : { base64Data: resumeFile?.data, mimeType: resumeFile?.mimeType }, 
+          targetRole,
+          true // Always use Standard/Economy mode for Resume to save cost
+      );
       setResumeData(data);
     } catch(e) { alert("Analysis Failed"); } finally { setIsAnalyzing(false); setAnalysisStep(""); }
   };
@@ -171,23 +191,64 @@ const App: React.FC = () => {
   const runMarketAgent = async () => {
     if (!hasApiKey) return;
     setIsScouting(true);
-    try {
-      const data = await scoutMarket(targetRole, location);
-      setMarketReport(data);
-    } catch(e) { alert("Market Scout Failed"); } finally { setIsScouting(false); }
+    setMarketReport(null);
+    
+    // CACHE LOGIC (Auto-Backend): 
+    // 1. Check if we have data for this Role + Location.
+    // 2. If yes AND it is < 30 days old, use it (Free).
+    // 3. If no OR it is > 30 days old, run LIVE AGENT (Paid), and update cache.
+    
+    const cacheKey = `market_${targetRole}_${location}`;
+    const cachedItem = localStorage.getItem(cacheKey);
+    const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+
+    let shouldUseCache = false;
+
+    if (cachedItem) {
+        try {
+            const { timestamp, data } = JSON.parse(cachedItem);
+            const age = Date.now() - timestamp;
+            if (age < THIRTY_DAYS) {
+                // Cache is valid
+                setMarketReport(data);
+                setMarketDataSource('cache');
+                setMarketDataTimestamp(timestamp);
+                setIsScouting(false);
+                shouldUseCache = true;
+                return;
+            }
+        } catch(e) { localStorage.removeItem(cacheKey); }
+    }
+
+    if (!shouldUseCache) {
+        // Run Live Agent (Costs $)
+        try {
+          const data = await scoutMarket(targetRole, location, false); // false = Disable Economy Mode (Enable Search)
+          
+          setMarketReport(data);
+          setMarketDataSource('live');
+          setMarketDataTimestamp(Date.now());
+          
+          // Save to cache with new timestamp
+          localStorage.setItem(cacheKey, JSON.stringify({ timestamp: Date.now(), data }));
+        } catch(e) { 
+            alert("Market Scout Failed"); 
+        } finally { 
+            setIsScouting(false); 
+        }
+    }
   };
 
   const runPortfolioAgent = async () => {
     if (!hasApiKey) return;
     setIsAuditing(true);
     setPortfolioData(null);
-    setAuditLogs(["Initializing Agent Delta...", "Scanning Target URL...", "Evaluating Visual UX..."]);
+    setAuditLogs(["Initializing Agent Delta...", "Analyzing Context...", "Evaluating Visual UX..."]);
     
     const steps = [
       "Accessing Repositories...",
       "Analyzing Work History...",
       "Checking Educational Background...",
-      "Searching for Contact Data...",
       "Deep Code Analysis...",
       "Synthesizing Holistic Report..."
     ];
@@ -201,7 +262,8 @@ const App: React.FC = () => {
     }, 2000);
 
     try {
-      const data = await analyzePortfolio(portfolioUrl, portfolioDesc, targetRole);
+      // Use Economy Mode (Standard) by default to avoid Search costs on URL
+      const data = await analyzePortfolio(portfolioUrl, portfolioDesc, targetRole, true);
       setPortfolioData(data);
     } catch(e) { alert("Portfolio Audit Failed"); } finally { 
         setIsAuditing(false);
@@ -214,7 +276,8 @@ const App: React.FC = () => {
     if (transcript.length > 2) {
       setIsGeneratingFeedback(true);
       try {
-        const feedback = await generateInterviewFeedback(transcript, targetRole);
+        // Use Economy Mode (Standard) for feedback
+        const feedback = await generateInterviewFeedback(transcript, targetRole, true);
         setInterviewFeedback(feedback);
       } catch(e) { console.error(e); } finally { setIsGeneratingFeedback(false); }
     }
@@ -240,12 +303,14 @@ const App: React.FC = () => {
         <div className="font-black text-2xl text-white tracking-tighter flex items-center gap-2">
             <span className="text-3xl">🚀</span> TechForge<span className="text-cyan-400">.AI</span>
         </div>
-        <div className="flex gap-2">
-          {[{ id: ActiveTab.RESUME, icon: '📄' }, { id: ActiveTab.PORTFOLIO, icon: '🧠' }, { id: ActiveTab.INTERVIEW, icon: '🎙️' }, { id: ActiveTab.MARKET, icon: '💰' }].map(t => (
-            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${activeTab === t.id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}>
-              <span>{t.icon}</span><span className="hidden md:inline">{t.id}</span>
-            </button>
-          ))}
+        <div className="flex items-center gap-4">
+            <div className="flex gap-2">
+            {[{ id: ActiveTab.RESUME, icon: '📄' }, { id: ActiveTab.PORTFOLIO, icon: '🧠' }, { id: ActiveTab.INTERVIEW, icon: '🎙️' }, { id: ActiveTab.MARKET, icon: '💰' }].map(t => (
+                <button key={t.id} onClick={() => setActiveTab(t.id)} className={`px-4 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2 ${activeTab === t.id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}>
+                <span>{t.icon}</span><span className="hidden md:inline">{t.id}</span>
+                </button>
+            ))}
+            </div>
         </div>
       </nav>
 
@@ -461,8 +526,10 @@ const App: React.FC = () => {
                     </div>
                  ) : (
                     <div className="h-[600px] bg-slate-950 border border-slate-800 rounded-3xl p-6 overflow-y-auto flex flex-col-reverse">
-                       {transcript.map((t, i) => (
-                          <div key={i} className={`mb-4 flex ${t.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
+                       {/* Reverse map to ensure correct visual order (Newest at Bottom) for flex-col-reverse */}
+                       {/* Filter out empty items to prevent ghost bubbles and glitches */}
+                       {transcript.filter(t => t.text && t.text.trim().length > 0).slice().reverse().map((t) => (
+                          <div key={t.id} className={`mb-4 flex ${t.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
                              <div className={`max-w-[80%] p-4 rounded-2xl text-sm ${t.speaker === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-300 rounded-bl-none'}`}>
                                 <div className="text-[10px] font-bold uppercase opacity-50 mb-1">{t.speaker}</div>
                                 {t.text}
@@ -487,13 +554,16 @@ const App: React.FC = () => {
                          <select value={location} onChange={(e) => setLocation(e.target.value)} className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm outline-none">{TECH_LOCATIONS.map(l => <option key={l} value={l}>{l}</option>)}</select>
                       </div>
                    </div>
-                   <button onClick={runMarketAgent} disabled={!hasApiKey || isScouting} className="px-8 py-3 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl h-[48px] w-full md:w-auto shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">
+                   <button onClick={runMarketAgent} disabled={!hasApiKey || isScouting} className={`px-8 py-3 font-bold rounded-xl h-[48px] w-full md:w-auto shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-white bg-purple-600 hover:bg-purple-500`}>
                       {isScouting ? 'Scouting...' : 'Scan Market'}
                    </button>
                 </div>
 
                 {marketReport && (
                    <div className="space-y-8 animate-fade-in-up">
+                      <div className="flex justify-center">
+                         <DataSourceBadge source={marketDataSource} timestamp={marketDataTimestamp} />
+                      </div>
                       <div className="grid md:grid-cols-3 gap-6">
                          <div className="glass-card p-6 rounded-3xl flex flex-col items-center justify-center col-span-1">
                              <GaugeChart score={marketReport.salaryPercentile} label="Market Percentile" />
@@ -588,7 +658,12 @@ const App: React.FC = () => {
                      <select value={targetRole} onChange={(e) => setTargetRole(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 mb-4 text-white text-sm outline-none">{TECH_ROLES.map(r => <option key={r} value={r}>{r}</option>)}</select>
                      <input value={portfolioUrl} onChange={(e) => setPortfolioUrl(e.target.value)} placeholder="GitHub / Portfolio URL" className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 mb-4 text-white text-sm" />
                      <textarea value={portfolioDesc} onChange={(e) => setPortfolioDesc(e.target.value)} placeholder="Project Context..." className="w-full h-24 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 mb-4 text-white text-sm" />
-                     <button onClick={runPortfolioAgent} disabled={!hasApiKey || isAuditing} className="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">{isAuditing ? 'Scanning...' : 'Deep Audit'}</button>
+                     <button onClick={runPortfolioAgent} disabled={!hasApiKey || isAuditing} className="w-full py-3 text-white rounded-xl font-bold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-pink-600 to-purple-600">
+                        {isAuditing ? 'Processing...' : 'Start Audit'}
+                     </button>
+                     <div className="text-[10px] text-slate-500 text-center mt-2">
+                         *Standard Mode: Analyzing description and context
+                     </div>
                   </div>
                </div>
                <div className="lg:col-span-8">
