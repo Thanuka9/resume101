@@ -1,8 +1,22 @@
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { InterviewStatus, InterviewPersona, TranscriptItem } from '../types';
 
 const AI_KEY = process.env.API_KEY || '';
+
+// Define specific focus areas for different roles to guide the AI
+const ROLE_GUIDES: Record<string, string> = {
+  "Software Engineer": "Focus on algorithms, data structures, code quality, and system design patterns.",
+  "Frontend Engineer": "Focus on React/DOM manipulation, CSS responsiveness, state management, and web accessibility (a11y).",
+  "Backend Engineer": "Focus on API design (REST/GraphQL), database optimization, concurrency, and microservices.",
+  "Data Scientist": "Focus STRICTLY on statistical modeling, data cleaning, Python/Pandas, SQL, and ML concepts. Do NOT ask about CSS, React, or mobile app development.",
+  "DevOps Engineer": "Focus on CI/CD pipelines, Docker/Kubernetes, Infrastructure as Code (Terraform), and bash scripting. Do NOT ask about frontend frameworks.",
+  "Product Manager": "Focus on product sense, metric prioritization, stakeholder management, and user empathy. No coding questions unless asked.",
+  "Mobile Developer": "Focus on native platforms (iOS/Android), memory management, offline storage, and UI thread performance.",
+  "Cybersecurity Analyst": "Focus on network security, threat vectors, log analysis, penetration testing methodologies, and compliance.",
+  "Cloud Architect": "Focus on AWS/Azure services, high availability, disaster recovery, and cost optimization."
+};
 
 export const useLiveAudio = (role: string, persona: InterviewPersona, userContext: string) => {
   const [status, setStatus] = useState<InterviewStatus>('idle');
@@ -21,6 +35,7 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
   const sourceNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const checkIntervalRef = useRef<any>(null);
   const isMutedRef = useRef(isMuted);
+  const isResettingRef = useRef(false);
 
   // Keep ref in sync with state for callbacks
   useEffect(() => {
@@ -82,7 +97,6 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
        stopCheckLoop();
        setConnectionLogs([]);
        addLog("Requesting Mic Access...");
-       // Enable echo cancellation and noise suppression for better transcription
        const stream = await navigator.mediaDevices.getUserMedia({ 
            audio: { 
                echoCancellation: true, 
@@ -122,22 +136,94 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
 
   const getSystemInstruction = () => {
     let style = "";
-    if (persona === 'Junior Peer') style = "PERSONA: Junior Peer. Friendly. Start with: 'Hey! Ready to chat about your code?'";
+    if (persona === 'Junior Peer') style = "PERSONA: Junior Peer. Friendly. Start with: 'Hey! Ready to chat about the role?'";
     else if (persona === 'Senior Engineer') style = "PERSONA: Senior Engineer. Direct. Start with: 'Hello. Let's review your technical background.'";
-    else if (persona === 'Staff Architect') style = "PERSONA: Staff Architect. Focus on scale. Start with: 'Hi. I want to dig into system design today.'";
+    else if (persona === 'Staff Architect') style = "PERSONA: Staff Architect. Focus on scale. Start with: 'Hi. I want to dig into how you design systems.'";
     else if (persona === 'Tech Lead') style = "PERSONA: Tech Lead. Focus on quality. Start with: 'Hi. Let's discuss your approach to maintainability.'";
     else style = "PERSONA: Hiring Manager. Focus on soft skills. Start with: 'Hi. Tell me what drives you in your career.'";
 
+    // Get specific technical focus based on the selected role
+    const roleFocus = ROLE_GUIDES[role] || "Focus on general technical and problem-solving skills relevant to the role.";
+
     return `
-      You are an interviewer for a ${role} position.
+      You are Agent Charlie, an interviewer for a ${role} position.
       ${style}
+      
+      ROLE-SPECIFIC INSTRUCTIONS:
+      ${roleFocus}
+
       Candidate Context: "${userContext}"
-      Rules:
+      
+      INSTRUCTIONS:
       1. YOU SPEAK FIRST using the exact greeting above.
-      2. Keep questions short (1-2 sentences).
+      2. Keep verbal questions short (1-2 sentences).
       3. Wait for the user to answer.
+      4. DO NOT repeat the user's answer back to them.
+      5. Adjust your technical questions to match the '${role}'.
+      
+      CODING MODE INSTRUCTIONS:
+      The user may submit code via text. When you receive a text message starting with "[CODE SUBMITTED]":
+      1. This is the candidate's solution to a problem or your previous question.
+      2. Analyze it immediately.
+      3. If they used the 'Scratchpad' (context provided in message), they are likely answering the question you JUST asked verbally. Link the code to that context.
+      4. Give VERBAL feedback like a real interviewer (e.g., "I see you used a hash map there, that's good for lookup time...").
     `;
   };
+
+  const sendTextMessage = useCallback((text: string) => {
+      if (sessionPromiseRef.current) {
+          addLog("Sending Text/Code...");
+          sessionPromiseRef.current.then(session => {
+              session.sendRealtimeInput([{ mimeType: 'text/plain', data: btoa(text) }]);
+              
+              setTranscript(prev => {
+                  const next = [...prev];
+                  // Mark previous item complete
+                  if (next.length > 0) next[next.length - 1].isComplete = true;
+                  
+                  next.push({
+                    id: generateId(),
+                    speaker: 'user',
+                    text: `[CODE SUBMITTED]:\n${text}`,
+                    timestamp: new Date().toLocaleTimeString(),
+                    isComplete: true
+                  });
+                  return next;
+              });
+          });
+      }
+  }, []);
+
+  const disconnect = useCallback(() => {
+    stopCheckLoop();
+    if (sessionPromiseRef.current) sessionPromiseRef.current.then(s => s.close());
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    inputContextRef.current?.close();
+    audioContextRef.current?.close();
+    sourceNodesRef.current.forEach(s => s.stop());
+    sourceNodesRef.current.clear();
+    
+    // Only set finished if we are NOT in the middle of a reset
+    if (!isResettingRef.current) {
+        setStatus('finished');
+    }
+    setIsAiSpeaking(false);
+  }, []);
+
+  const resetSession = useCallback(() => {
+      // Set reset flag to true to prevent onclose callback from setting status to 'finished'
+      isResettingRef.current = true;
+      disconnect();
+      setTranscript([]);
+      setConnectionLogs([]);
+      setStatus('idle');
+      setVolume(0);
+      
+      // Clear flag after a safety buffer
+      setTimeout(() => {
+          isResettingRef.current = false;
+      }, 1000);
+  }, [disconnect]);
 
   const connect = useCallback(async () => {
     if (!AI_KEY) return;
@@ -150,14 +236,12 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
       const ai = new GoogleGenAI({ apiKey: AI_KEY });
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       
-      // Ensure clean contexts
       if (inputContextRef.current) inputContextRef.current.close();
       inputContextRef.current = new AudioCtx({ sampleRate: 16000 });
 
       if (audioContextRef.current) audioContextRef.current.close();
       audioContextRef.current = new AudioCtx({ sampleRate: 24000 });
       
-      // Resume context (important for browsers)
       await inputContextRef.current.resume();
       await audioContextRef.current.resume();
       
@@ -182,8 +266,8 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
             voiceConfig: { prebuiltVoiceConfig: { voiceName: persona === 'Staff Architect' ? 'Fenrir' : 'Puck' } },
           },
           systemInstruction: getSystemInstruction(),
-          inputAudioTranscription: {}, // Request transcript
-          outputAudioTranscription: {}, // Request transcript
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
         },
       };
 
@@ -197,23 +281,19 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
             addLog("Connected! Sending greeting trigger...");
             nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
             
-            // Send Greeting Trigger
             sessionPromiseRef.current?.then(session => {
                session.sendRealtimeInput([{ mimeType: 'text/plain', data: btoa("User connected. Say your greeting now.") }]);
             });
 
-            // Setup Audio Processing
             const source = inputContextRef.current!.createMediaStreamSource(streamRef.current!);
             const processor = inputContextRef.current!.createScriptProcessor(4096, 1, 1);
             
             processor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
-              // Volume Viz
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
               setVolume(Math.sqrt(sum / inputData.length));
 
-              // Check ref instead of state to avoid stale closure
               if (!isMutedRef.current) {
                  const blob = createBlob(inputData);
                  sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: blob }));
@@ -221,84 +301,78 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
             };
 
             source.connect(processor);
-            processor.connect(inputContextRef.current!.destination); // Keep alive
+            processor.connect(inputContextRef.current!.destination);
           },
           onmessage: async (msg: LiveServerMessage) => {
             const serverContent = msg.serverContent;
             
-            // Atomic update to transcript to prevent out-of-order fragmentation
-            setTranscript(currentTranscript => {
-              let newTranscript = [...currentTranscript];
-              const getLast = () => newTranscript.length > 0 ? newTranscript[newTranscript.length - 1] : null;
+            setTranscript(prev => {
+                const next = [...prev];
+                let last = next.length > 0 ? next[next.length - 1] : null;
 
-              // 1. Handle Model Speech (Output)
-              if (serverContent?.outputTranscription?.text) {
-                const text = serverContent.outputTranscription.text;
-                // Avoid creating bubbles for empty strings
-                if (text && text.length > 0) {
-                    const last = getLast();
-                    if (last && last.speaker === 'ai' && !last.isComplete) {
-                        newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
-                    } else {
-                        // If switching from user to AI, mark user done
-                        if (last && last.speaker === 'user' && !last.isComplete) {
-                            newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
-                        }
-                        newTranscript.push({
-                            id: generateId(),
-                            speaker: 'ai',
-                            text,
-                            timestamp: new Date().toLocaleTimeString(),
-                            isComplete: false
-                        });
+                const markLastComplete = () => {
+                    if (last && !last.isComplete) {
+                        next[next.length - 1] = { ...last, isComplete: true };
+                        last = next[next.length - 1]; // Update reference
                     }
+                };
+
+                // 1. Handle Turn Completion/Interruption FIRST
+                if (serverContent?.turnComplete || serverContent?.interrupted) {
+                    markLastComplete();
                 }
-              }
-              
-              // 2. Handle User Speech (Input)
-              if (serverContent?.inputTranscription?.text) {
-                const text = serverContent.inputTranscription.text;
-                if (text && text.length > 0) {
-                    const last = getLast(); // Get potentially updated last from step 1
-                    if (last && last.speaker === 'user' && !last.isComplete) {
-                        newTranscript[newTranscript.length - 1] = { ...last, text: last.text + text };
-                    } else {
-                        // If switching from AI to user, mark AI done
+
+                // 2. Handle AI Speech
+                if (serverContent?.outputTranscription?.text) {
+                    const text = serverContent.outputTranscription.text;
+                    if (text && text.trim().length > 0) {
                         if (last && last.speaker === 'ai' && !last.isComplete) {
-                            newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
+                            next[next.length - 1] = { ...last, text: last.text + text };
+                        } else {
+                            markLastComplete();
+                            const newItem: TranscriptItem = {
+                                id: generateId(),
+                                speaker: 'ai',
+                                text: text,
+                                timestamp: new Date().toLocaleTimeString(),
+                                isComplete: false
+                            };
+                            next.push(newItem);
+                            last = newItem;
                         }
-                        newTranscript.push({
-                            id: generateId(),
-                            speaker: 'user',
-                            text,
-                            timestamp: new Date().toLocaleTimeString(),
-                            isComplete: false
-                        });
                     }
                 }
-              }
 
-              // 3. Handle Turn Completion & Interruptions
-              if (serverContent?.turnComplete || serverContent?.interrupted) {
-                 const last = getLast();
-                 if (last && !last.isComplete) {
-                    newTranscript[newTranscript.length - 1] = { ...last, isComplete: true };
-                 }
-              }
+                // 3. Handle User Speech
+                if (serverContent?.inputTranscription?.text) {
+                    const text = serverContent.inputTranscription.text;
+                    if (text && text.trim().length > 0) {
+                        if (last && last.speaker === 'user' && !last.isComplete) {
+                            next[next.length - 1] = { ...last, text: last.text + text };
+                        } else {
+                            markLastComplete();
+                            const newItem: TranscriptItem = {
+                                id: generateId(),
+                                speaker: 'user',
+                                text: text,
+                                timestamp: new Date().toLocaleTimeString(),
+                                isComplete: false
+                            };
+                            next.push(newItem);
+                            last = newItem;
+                        }
+                    }
+                }
 
-              return newTranscript;
+                return next;
             });
 
             if (serverContent?.interrupted) {
-                // Clear audio queue immediately
-                for (const source of sourceNodesRef.current) {
-                    source.stop();
-                }
+                for (const source of sourceNodesRef.current) source.stop();
                 sourceNodesRef.current.clear();
                 nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
             }
 
-            // Handle Audio Output
             const data = serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (data && audioContextRef.current) {
               const buffer = await decodeAudioData(data, audioContextRef.current);
@@ -316,7 +390,14 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
               };
             }
           },
-          onclose: () => { setStatus('finished'); setIsAiSpeaking(false); addLog("Session Closed"); },
+          onclose: () => {
+             // If we are intentionally resetting, ignore this close event
+             if (isResettingRef.current) return;
+             
+             setStatus('finished'); 
+             setIsAiSpeaking(false); 
+             addLog("Session Closed"); 
+          },
           onerror: (err) => { console.error(err); setStatus('error'); setIsAiSpeaking(false); addLog(`Error: ${err}`); }
         }
       });
@@ -326,21 +407,9 @@ export const useLiveAudio = (role: string, persona: InterviewPersona, userContex
       setStatus('error');
       addLog("Connection Failed");
     }
-  }, [role, persona, userContext]); // Removed isMuted from dependency array as it's handled via Ref
-
-  const disconnect = useCallback(() => {
-    stopCheckLoop();
-    if (sessionPromiseRef.current) sessionPromiseRef.current.then(s => s.close());
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    inputContextRef.current?.close();
-    audioContextRef.current?.close();
-    sourceNodesRef.current.forEach(s => s.stop());
-    sourceNodesRef.current.clear();
-    setStatus('finished');
-    setIsAiSpeaking(false);
-  }, []);
+  }, [role, persona, userContext]); 
 
   const toggleMute = () => setIsMuted(!isMuted);
 
-  return { checkMic, playTestSound, connect, disconnect, toggleMute, isMuted, isAiSpeaking, status, volume, transcript, connectionLogs };
+  return { checkMic, playTestSound, connect, disconnect, resetSession, toggleMute, sendTextMessage, isMuted, isAiSpeaking, status, volume, transcript, connectionLogs };
 };

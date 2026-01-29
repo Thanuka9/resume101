@@ -1,5 +1,4 @@
 
-
 import { Modality } from "@google/genai";
 
 export enum ActiveTab {
@@ -139,4 +138,25 @@ export interface InterviewFeedback {
   areasForImprovement: string[];
   detailedFeedback: InterviewFeedbackDetail[];
   hiringRecommendation: "Strong No Hire" | "No Hire" | "Leaning No Hire" | "Leaning Hire" | "Hire" | "Strong Hire";
+}
+
+export type ChallengeCategory = 'General' | 'Frontend' | 'Backend' | 'Data' | 'DevOps' | 'Security';
+
+export interface CodingChallenge {
+  id: string;
+  title: string;
+  difficulty: 'Easy' | 'Medium' | 'Hard';
+  category: ChallengeCategory;
+  description: string;
+  examples: string;
+  constraints: string;
+  starterCode: string;
+}
+
+export interface CodeEvaluation {
+  passed: boolean;
+  correctness: string;
+  timeComplexity: string;
+  spaceComplexity: string;
+  codeStyle: string;
 }

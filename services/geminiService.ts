@@ -1,5 +1,6 @@
+
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis, TranscriptItem, InterviewFeedback } from "../types";
+import { ResumeAnalysis, MarketReport, GroundingSource, PortfolioAnalysis, TranscriptItem, InterviewFeedback, CodeEvaluation } from "../types";
 
 const cleanAndParseJSON = (text: string) => {
   try {
@@ -268,16 +269,67 @@ export const analyzePortfolio = async (
   return cleanAndParseJSON(response.text) as PortfolioAnalysis;
 };
 
-export const generateInterviewQuestions = async (role: string): Promise<string[]> => {
+export const evaluateCodeSubmission = async (
+  code: string, 
+  challengeTitle: string, 
+  challengeDesc: string
+): Promise<CodeEvaluation> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  // Detect if this is a custom/scratchpad submission
+  const isCustom = challengeTitle.includes("Scratchpad") || challengeTitle.includes("Free Coding");
+  
+  const prompt = isCustom 
+    ? `
+      You are a Senior Technical Interviewer evaluating a candidate's ad-hoc code snippet.
+      
+      User Code:
+      ${code}
+      
+      The user wrote this code in a "Scratchpad" during an interview. They might be answering a question you just asked, or demonstrating a concept.
+      
+      Task:
+      1. Analyze the code for syntax errors, bugs, and best practices (Clean Code).
+      2. Infer the likely intent (e.g., "Attempting to reverse a string", "Writing a SQL query").
+      3. Evaluate efficiency (Time/Space) if applicable.
+      
+      Return strictly JSON.
+    ` 
+    : `
+      You are a Strict Code Interviewer.
+      Problem Context: ${challengeTitle}
+      Description/Goal: ${challengeDesc}
+      User Code:
+      ${code}
+
+      Task:
+      Evaluate the code against the specific problem description.
+      Evaluate for Correctness, Time Complexity, Space Complexity, and Style.
+      Return strictly JSON.
+    `;
+
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
-    contents: `Generate 5 challenging technical interview questions for a ${role}. Return JSON array of strings.`,
-    config: { responseMimeType: "application/json", responseSchema: { type: Type.ARRAY, items: { type: Type.STRING } } }
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          passed: { type: Type.BOOLEAN },
+          correctness: { type: Type.STRING },
+          timeComplexity: { type: Type.STRING },
+          spaceComplexity: { type: Type.STRING },
+          codeStyle: { type: Type.STRING }
+        },
+        required: ["passed", "correctness", "timeComplexity", "spaceComplexity", "codeStyle"]
+      }
+    }
   });
-  if (!response.text) return ["Tell me about yourself."];
-  return cleanAndParseJSON(response.text) as string[];
-};
+  
+  if (!response.text) throw new Error("Code evaluation failed");
+  return cleanAndParseJSON(response.text) as CodeEvaluation;
+}
 
 export const generateInterviewFeedback = async (
   transcript: TranscriptItem[],

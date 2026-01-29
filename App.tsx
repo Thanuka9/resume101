@@ -1,11 +1,19 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { ActiveTab, ResumeAnalysis, MarketReport, PortfolioAnalysis, InterviewPersona, SkillRating, InterviewFeedback } from './types';
-import { analyzeResumeDeep, scoutMarket, analyzePortfolio, generateInterviewFeedback } from './services/geminiService';
+import { ActiveTab, ResumeAnalysis, MarketReport, PortfolioAnalysis, InterviewPersona, SkillRating, InterviewFeedback, CodingChallenge, CodeEvaluation, ChallengeCategory } from './types';
+import { analyzeResumeDeep, scoutMarket, analyzePortfolio, generateInterviewFeedback, evaluateCodeSubmission } from './services/geminiService';
 import { useLiveAudio } from './hooks/useLiveAudio';
 
 const TECH_ROLES = ["Software Engineer", "Frontend Engineer", "Backend Engineer", "Data Scientist", "DevOps Engineer", "Product Manager", "Mobile Developer", "Cybersecurity Analyst", "Cloud Architect"];
 const TECH_LOCATIONS = ["United States", "United Kingdom", "Canada", "Germany", "Netherlands", "Sweden", "France", "Switzerland", "Singapore", "India", "Sri Lanka", "Australia", "Japan", "United Arab Emirates", "Brazil", "Remote (Global)"];
+
+const PERSONA_DESCRIPTIONS: Record<InterviewPersona, string> = {
+    'Junior Peer': 'Casual & Friendly. Focuses on basic syntax, comfort with code, and collaboration.',
+    'Senior Engineer': 'Direct & Technical. Focuses on implementation details, edge cases, and optimization.',
+    'Staff Architect': 'High-Level & Strategic. Focuses on system design, scalability, and trade-offs.',
+    'Tech Lead': 'Balanced & Quality-Focused. Checks code maintainability, testing, and team fit.',
+    'Hiring Manager': 'Behavioral & Cultural. Focuses on soft skills, career goals, and past experiences.'
+};
 
 // --- Visual Components ---
 const RadarChart = ({ data }: { data: any }) => {
@@ -108,6 +116,213 @@ const DataSourceBadge = ({ source, timestamp }: { source: 'live' | 'cache' | 'es
     return <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-700 text-slate-300 text-xs font-bold border border-slate-600">⚡ AI Estimate (No Cache)</div>;
 };
 
+// --- Coding Challenge Library ---
+const CODING_CHALLENGES: CodingChallenge[] = [
+    {
+        id: 'scratchpad',
+        title: 'Free Coding / Scratchpad',
+        difficulty: 'Easy',
+        category: 'General',
+        description: 'A blank canvas. Use this to solve any custom question asked by the interviewer, or to sketch out your thoughts.',
+        examples: 'N/A',
+        constraints: 'None',
+        starterCode: '// Write your code here...'
+    },
+    // General / Backend
+    {
+        id: 'two-sum',
+        title: 'Two Sum',
+        difficulty: 'Easy',
+        category: 'General',
+        description: 'Given an array of integers nums and an integer target, return indices of the two numbers such that they add up to target.',
+        examples: 'Input: nums = [2,7,11,15], target = 9\nOutput: [0,1]',
+        constraints: '2 <= nums.length <= 10^4',
+        starterCode: 'function twoSum(nums: number[], target: number): number[] {\n  // Write your code here\n  \n}'
+    },
+    // Frontend
+    {
+        id: 'react-counter',
+        title: 'Simple Counter Hook',
+        difficulty: 'Easy',
+        category: 'Frontend',
+        description: 'Create a React custom hook useCounter that manages a count state with increment, decrement, and reset functions.',
+        examples: 'const { count, increment } = useCounter(0);',
+        constraints: 'Must use React.useState',
+        starterCode: 'import { useState } from "react";\n\nexport const useCounter = (initialValue: number = 0) => {\n  // Implement hook here\n};'
+    },
+    {
+        id: 'css-center',
+        title: 'Centering a Div',
+        difficulty: 'Easy',
+        category: 'Frontend',
+        description: 'Write the CSS to perfectly center a child div inside a parent div (both vertically and horizontally).',
+        examples: 'Parent: 100vh height',
+        constraints: 'Use Flexbox or Grid',
+        starterCode: '.parent {\n  /* Your CSS */\n}\n\n.child {\n  /* Your CSS */\n}'
+    },
+    // Data Science
+    {
+        id: 'pandas-cleaning',
+        title: 'Data Cleaning (Pandas)',
+        difficulty: 'Medium',
+        category: 'Data',
+        description: 'Given a DataFrame `df` with columns "name", "age", and "salary". Drop rows with missing values and fill missing ages with the mean age.',
+        examples: 'df.dropna(subset=["salary"])',
+        constraints: 'Use Python Pandas library syntax',
+        starterCode: 'import pandas as pd\n\ndef clean_data(df):\n    # Write your data cleaning logic here\n    return df'
+    },
+    {
+        id: 'sql-query',
+        title: 'Employee Salaries SQL',
+        difficulty: 'Medium',
+        category: 'Data',
+        description: 'Write a SQL query to find the names of employees who earn more than their managers.',
+        examples: 'Table: Employee (id, name, salary, managerId)',
+        constraints: 'Standard SQL',
+        starterCode: '-- Write your SQL query here\nSELECT ...'
+    },
+    // DevOps
+    {
+        id: 'dockerfile-node',
+        title: 'Node.js Dockerfile',
+        difficulty: 'Medium',
+        category: 'DevOps',
+        description: 'Create a Dockerfile for a Node.js application. It should use a multi-stage build to keep the image size small.',
+        examples: 'FROM node:18-alpine',
+        constraints: 'Use multi-stage build',
+        starterCode: '# Build Stage\nFROM node:18 AS builder\n\n# ...\n\n# Production Stage\nFROM node:18-alpine\n'
+    },
+    {
+        id: 'bash-log-parse',
+        title: 'Log Error Parser (Bash)',
+        difficulty: 'Easy',
+        category: 'DevOps',
+        description: 'Write a bash script to count the number of lines containing "ERROR" in a log file passed as an argument.',
+        examples: './count_errors.sh app.log',
+        constraints: 'Use grep or awk',
+        starterCode: '#!/bin/bash\nFILE=$1\n# Write script here'
+    },
+    // Security
+    {
+        id: 'python-port-scan',
+        title: 'Simple Port Scanner',
+        difficulty: 'Medium',
+        category: 'Security',
+        description: 'Write a Python script that attempts to connect to a specific host on a range of ports to check if they are open.',
+        examples: 'scan_ports("127.0.0.1", [80, 443, 22])',
+        constraints: 'Use socket library',
+        starterCode: 'import socket\n\ndef scan_ports(ip, ports):\n    # Implement scanner\n    pass'
+    }
+];
+
+// Map Roles to Challenge Categories
+const getCategoriesForRole = (role: string): ChallengeCategory[] => {
+    if (role.includes('Frontend') || role.includes('Mobile')) return ['Frontend', 'General'];
+    if (role.includes('Backend') || role.includes('Cloud')) return ['Backend', 'General', 'DevOps'];
+    if (role.includes('Data')) return ['Data', 'General'];
+    if (role.includes('DevOps') || role.includes('Cloud')) return ['DevOps', 'Backend', 'General'];
+    if (role.includes('Security') || role.includes('Cyber')) return ['Security', 'General'];
+    if (role.includes('Product Manager')) return ['General']; 
+    return ['General', 'Frontend', 'Backend']; // Default/Software Engineer
+};
+
+// --- Code Editor Component ---
+const CodePad = ({ code, setCode, onSubmit, isSubmitting, challenge, evaluation, onNext, hasNext }: { code: string, setCode: (c: string) => void, onSubmit: () => void, isSubmitting: boolean, challenge: CodingChallenge | null, evaluation: CodeEvaluation | null, onNext: () => void, hasNext: boolean }) => {
+    return (
+        <div className="flex flex-col h-full bg-[#1e1e1e] rounded-xl border border-slate-700 overflow-hidden shadow-2xl relative">
+            {challenge && challenge.id !== 'scratchpad' && (
+                <div className="bg-slate-900 border-b border-black p-4">
+                    <div className="flex justify-between items-center mb-2">
+                        <h3 className="text-white font-bold">{challenge.title}</h3>
+                        <div className="flex gap-2">
+                            <span className="text-[10px] px-2 py-1 rounded font-bold uppercase bg-slate-700 text-slate-300">{challenge.category}</span>
+                            <span className={`text-[10px] px-2 py-1 rounded font-bold uppercase ${challenge.difficulty === 'Easy' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{challenge.difficulty}</span>
+                        </div>
+                    </div>
+                    <div className="text-slate-300 text-xs leading-relaxed mb-3">{challenge.description}</div>
+                    <div className="bg-black/30 p-2 rounded text-[10px] font-mono text-slate-400 whitespace-pre-wrap">
+                        {challenge.examples}
+                    </div>
+                </div>
+            )}
+            {challenge && challenge.id === 'scratchpad' && (
+                <div className="bg-slate-900 border-b border-black p-4">
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-white font-bold">Free Coding Mode</h3>
+                        <span className="text-[10px] px-2 py-1 rounded font-bold uppercase bg-blue-500/20 text-blue-400">Scratchpad</span>
+                    </div>
+                    <div className="text-slate-400 text-xs mt-1">
+                        Use this space to write code for any question the interviewer asks you.
+                    </div>
+                </div>
+            )}
+
+            <div className="bg-[#2d2d2d] px-4 py-2 flex justify-between items-center border-b border-black">
+                <div className="flex gap-2">
+                    <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                    <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                    <div className="w-3 h-3 rounded-full bg-green-500"></div>
+                </div>
+                <div className="text-xs font-mono text-slate-400">editor.ts</div>
+            </div>
+            <textarea 
+                value={code} 
+                onChange={(e) => setCode(e.target.value)} 
+                className="flex-1 w-full bg-[#1e1e1e] text-emerald-300 font-mono text-sm p-4 outline-none resize-none leading-relaxed"
+                spellCheck={false}
+                placeholder="// Start typing your solution..."
+                autoFocus
+            />
+            
+            {/* Immediate Feedback Panel */}
+            {evaluation && (
+                <div className={`border-t border-b border-black p-4 ${evaluation.passed ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
+                    <div className="flex justify-between items-center mb-2">
+                        <span className={`font-bold text-sm ${evaluation.passed ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {evaluation.passed ? '✅ Logic Checks' : '⚠️ Potential Issues'}
+                        </span>
+                        <span className="text-xs font-mono text-slate-400">Analysis Result</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 text-xs">
+                        <div>
+                            <div className="text-slate-500 font-bold uppercase mb-1">Time Complexity</div>
+                            <div className="text-slate-300 font-mono">{evaluation.timeComplexity}</div>
+                        </div>
+                        <div>
+                             <div className="text-slate-500 font-bold uppercase mb-1">Space Complexity</div>
+                             <div className="text-slate-300 font-mono">{evaluation.spaceComplexity}</div>
+                        </div>
+                    </div>
+                    <div className="mt-2 text-xs text-slate-400 italic">
+                        "{evaluation.codeStyle}"
+                    </div>
+                </div>
+            )}
+
+            <div className="p-3 bg-[#2d2d2d] border-t border-black flex justify-between items-center">
+                 <div className="text-[10px] text-slate-500">
+                    {isSubmitting ? 'Analyzing Code...' : 'Ready'}
+                 </div>
+                 <div className="flex gap-2">
+                     {evaluation && hasNext && challenge?.id !== 'scratchpad' && (
+                         <button onClick={onNext} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded-lg text-xs transition-all">
+                             Next Challenge →
+                         </button>
+                     )}
+                    <button 
+                        onClick={onSubmit} 
+                        disabled={isSubmitting}
+                        className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-2"
+                    >
+                        {isSubmitting ? 'Evaluating...' : 'Submit to Interviewer'} 
+                        <span className="text-lg">▶</span>
+                    </button>
+                 </div>
+            </div>
+        </div>
+    );
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>(ActiveTab.RESUME);
   const [resumeData, setResumeData] = useState<ResumeAnalysis | null>(null);
@@ -119,6 +334,7 @@ const App: React.FC = () => {
 
   const [portfolioData, setPortfolioData] = useState<PortfolioAnalysis | null>(null);
   const [interviewFeedback, setInterviewFeedback] = useState<InterviewFeedback | null>(null);
+  const [summaryTab, setSummaryTab] = useState<'overview' | 'transcript'>('overview');
   
   // Inputs
   const [targetRole, setTargetRole] = useState("Software Engineer");
@@ -142,10 +358,25 @@ const App: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<string[]>([]);
   const [showInterviewGuide, setShowInterviewGuide] = useState(true);
 
+  // Coding Mode State
+  const [isCodingMode, setIsCodingMode] = useState(false);
+  const [codeSnippet, setCodeSnippet] = useState("");
+  const [activeChallenge, setActiveChallenge] = useState<CodingChallenge | null>(null);
+  const [isSendingCode, setIsSendingCode] = useState(false);
+  const [showChallengeSelector, setShowChallengeSelector] = useState(false);
+  const [codeEvaluation, setCodeEvaluation] = useState<CodeEvaluation | null>(null);
+  
+  // Computed available challenges based on selected role
+  const availableChallenges = CODING_CHALLENGES.filter(c => {
+     if (c.id === 'scratchpad') return true;
+     const allowedCategories = getCategoriesForRole(targetRole);
+     return allowedCategories.includes(c.category);
+  });
+
   const hasApiKey = !!process.env.API_KEY;
 
   // Refs
-  const { checkMic, playTestSound, connect, disconnect, status, volume, transcript, isMuted, isAiSpeaking, toggleMute, connectionLogs } = useLiveAudio(targetRole, interviewPersona, interviewFocus);
+  const { checkMic, playTestSound, connect, disconnect, resetSession, sendTextMessage, status, volume, transcript, isMuted, isAiSpeaking, toggleMute, connectionLogs } = useLiveAudio(targetRole, interviewPersona, interviewFocus);
   
   // Starfield
   const [stars, setStars] = useState<any[]>([]);
@@ -182,7 +413,7 @@ const App: React.FC = () => {
       const data = await analyzeResumeDeep(
           dictatedText ? { text: dictatedText } : { base64Data: resumeFile?.data, mimeType: resumeFile?.mimeType }, 
           targetRole,
-          true // Always use Standard/Economy mode for Resume to save cost
+          true
       );
       setResumeData(data);
     } catch(e) { alert("Analysis Failed"); } finally { setIsAnalyzing(false); setAnalysisStep(""); }
@@ -192,16 +423,9 @@ const App: React.FC = () => {
     if (!hasApiKey) return;
     setIsScouting(true);
     setMarketReport(null);
-    
-    // CACHE LOGIC (Auto-Backend): 
-    // 1. Check if we have data for this Role + Location.
-    // 2. If yes AND it is < 30 days old, use it (Free).
-    // 3. If no OR it is > 30 days old, run LIVE AGENT (Paid), and update cache.
-    
     const cacheKey = `market_${targetRole}_${location}`;
     const cachedItem = localStorage.getItem(cacheKey);
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
-
     let shouldUseCache = false;
 
     if (cachedItem) {
@@ -209,7 +433,6 @@ const App: React.FC = () => {
             const { timestamp, data } = JSON.parse(cachedItem);
             const age = Date.now() - timestamp;
             if (age < THIRTY_DAYS) {
-                // Cache is valid
                 setMarketReport(data);
                 setMarketDataSource('cache');
                 setMarketDataTimestamp(timestamp);
@@ -221,15 +444,11 @@ const App: React.FC = () => {
     }
 
     if (!shouldUseCache) {
-        // Run Live Agent (Costs $)
         try {
-          const data = await scoutMarket(targetRole, location, false); // false = Disable Economy Mode (Enable Search)
-          
+          const data = await scoutMarket(targetRole, location, false); 
           setMarketReport(data);
           setMarketDataSource('live');
           setMarketDataTimestamp(Date.now());
-          
-          // Save to cache with new timestamp
           localStorage.setItem(cacheKey, JSON.stringify({ timestamp: Date.now(), data }));
         } catch(e) { 
             alert("Market Scout Failed"); 
@@ -262,7 +481,6 @@ const App: React.FC = () => {
     }, 2000);
 
     try {
-      // Use Economy Mode (Standard) by default to avoid Search costs on URL
       const data = await analyzePortfolio(portfolioUrl, portfolioDesc, targetRole, true);
       setPortfolioData(data);
     } catch(e) { alert("Portfolio Audit Failed"); } finally { 
@@ -273,15 +491,82 @@ const App: React.FC = () => {
 
   const endInterview = async () => {
     disconnect();
+    // Exit coding mode when interview ends
+    setIsCodingMode(false);
+    setActiveChallenge(null);
     if (transcript.length > 2) {
       setIsGeneratingFeedback(true);
       try {
-        // Use Economy Mode (Standard) for feedback
         const feedback = await generateInterviewFeedback(transcript, targetRole, true);
         setInterviewFeedback(feedback);
       } catch(e) { console.error(e); } finally { setIsGeneratingFeedback(false); }
     }
   };
+
+  const resetInterview = () => {
+      setInterviewFeedback(null);
+      resetSession(); // Clears hook state
+      setIsCodingMode(false);
+      setActiveChallenge(null);
+      setCodeEvaluation(null);
+      setShowInterviewGuide(true);
+      setSummaryTab('overview');
+  };
+
+  const startChallenge = (challenge: CodingChallenge) => {
+      setActiveChallenge(challenge);
+      setCodeSnippet(challenge.starterCode);
+      setIsCodingMode(true);
+      setCodeEvaluation(null);
+      setShowChallengeSelector(false);
+      
+      // Inject Context to AI
+      const systemMsg = challenge.id === 'scratchpad' 
+        ? `[SYSTEM UPDATE]: User has opened a free coding scratchpad to answer your question. They are writing code now.`
+        : `[SYSTEM UPDATE]: User started coding challenge: ${challenge.title}. ${challenge.description}. Ask for their approach.`;
+      
+      sendTextMessage(systemMsg);
+  };
+
+  const openScratchpad = () => {
+      const scratchpad = CODING_CHALLENGES.find(c => c.id === 'scratchpad');
+      if (scratchpad) startChallenge(scratchpad);
+  };
+
+  const handleCodeSubmit = async () => {
+      if (!codeSnippet.trim()) return;
+      setIsSendingCode(true);
+      
+      const isCustom = activeChallenge?.id === 'scratchpad' || !activeChallenge;
+      
+      // 1. Send to Voice AI for roleplay
+      const ctx = isCustom ? 'User defined custom code for recent question' : `Problem: ${activeChallenge.title}`;
+      const msgHeader = isCustom ? '[CODE SUBMITTED (SCRATCHPAD)]' : '[CODE SUBMITTED]';
+      
+      sendTextMessage(`${msgHeader}:\n${codeSnippet}\n\n[INSTRUCTION]: Review this solution for: ${ctx}. Critique logic/style.`);
+
+      // 2. Parallel: Get structured text feedback
+      try {
+          const evalResult = await evaluateCodeSubmission(
+              codeSnippet, 
+              activeChallenge?.title || "Free Coding / Scratchpad", 
+              activeChallenge?.description || "Evaluate this code for general correctness and style."
+          );
+          setCodeEvaluation(evalResult);
+      } catch(e) {
+          console.error("Code Eval Failed", e);
+      } finally {
+          setIsSendingCode(false);
+      }
+  };
+
+  const handleNextChallenge = () => {
+      if (!activeChallenge) return;
+      const idx = availableChallenges.findIndex(c => c.id === activeChallenge.id);
+      if (idx !== -1 && idx < availableChallenges.length - 1) {
+          startChallenge(availableChallenges[idx + 1]);
+      }
+  }
 
   // --- Render Helpers ---
   const ScoreCard = ({ label, score, desc }: any) => (
@@ -415,10 +700,45 @@ const App: React.FC = () => {
 
           {/* --- INTERVIEW TAB --- */}
           {activeTab === ActiveTab.INTERVIEW && (
-            <div className="grid lg:grid-cols-12 gap-8 animate-fade-in-up">
+            <div className="grid lg:grid-cols-12 gap-6 animate-fade-in-up">
               
+              {/* CHALLENGE SELECTOR MODAL */}
+              {showChallengeSelector && (
+                 <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+                     <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-2xl w-full p-8 shadow-2xl">
+                         <div className="flex justify-between items-center mb-6">
+                            <div>
+                                <h3 className="text-2xl font-black text-white">Select Code Environment</h3>
+                                <p className="text-slate-400 text-xs">Curated for: <span className="text-cyan-400 font-bold">{targetRole}</span></p>
+                            </div>
+                            <button onClick={() => setShowChallengeSelector(false)} className="text-slate-500 hover:text-white">✕</button>
+                         </div>
+                         
+                         <div className="grid gap-4 max-h-[60vh] overflow-y-auto pr-2">
+                             {availableChallenges.map(c => (
+                                 <button key={c.id} onClick={() => startChallenge(c)} className="bg-slate-800 hover:bg-slate-700 border border-slate-700 p-4 rounded-xl text-left transition-all group relative overflow-hidden">
+                                     <div className="flex justify-between items-center mb-1">
+                                         <div className="flex items-center gap-2">
+                                             <span className="font-bold text-white group-hover:text-cyan-400 transition-colors">{c.title}</span>
+                                             {c.id !== 'scratchpad' && <span className="text-[10px] px-2 py-0.5 rounded font-bold uppercase bg-slate-900 text-slate-400">{c.category}</span>}
+                                         </div>
+                                         <span className={`text-[10px] px-2 py-1 rounded font-bold uppercase ${c.difficulty === 'Easy' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{c.difficulty}</span>
+                                     </div>
+                                     <div className="text-xs text-slate-400 line-clamp-2">{c.description}</div>
+                                 </button>
+                             ))}
+                             {availableChallenges.length === 1 && (
+                                 <div className="text-center text-slate-500 text-xs py-4">
+                                     No specific challenges found for this role category. Try the Scratchpad!
+                                 </div>
+                             )}
+                         </div>
+                     </div>
+                 </div>
+              )}
+
               {/* --- ONBOARDING OVERLAY --- */}
-              {showInterviewGuide && status === 'idle' && (
+              {showInterviewGuide && (status === 'idle' || status === 'finished') && (
                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
                     <div className="bg-slate-900 border border-slate-700 rounded-3xl p-8 max-w-lg w-full shadow-2xl">
                        <h2 className="text-2xl font-black text-white mb-4">🎤 Ready for the Dojo?</h2>
@@ -429,7 +749,7 @@ const App: React.FC = () => {
                           </div>
                           <div className="flex gap-4 items-center">
                              <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center font-bold text-cyan-400">2</div>
-                             <p className="text-slate-300 text-sm">Agent Charlie will <strong>greet you first</strong>.</p>
+                             <p className="text-slate-300 text-sm">Agent Charlie ({targetRole} Expert) will <strong>greet you first</strong>.</p>
                           </div>
                           <div className="flex gap-4 items-center">
                              <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center font-bold text-cyan-400">3</div>
@@ -441,105 +761,181 @@ const App: React.FC = () => {
                  </div>
               )}
 
-              <div className="lg:col-span-4 space-y-6">
-                 <div className="glass-card p-8 rounded-3xl relative">
-                    <h2 className="text-2xl font-black text-white mb-2">Agent Charlie</h2>
-                    <p className="text-xs text-slate-400 mb-6 uppercase tracking-widest">Voice-to-Voice Simulator</p>
+              {/* --- COLUMN 1: CONTROLS & AVATAR (Left) --- */}
+              <div className={`${isCodingMode ? 'lg:col-span-3' : 'lg:col-span-4'} space-y-4 flex flex-col transition-all duration-500`}>
+                 <div className="glass-card p-6 rounded-3xl relative flex flex-col gap-4">
+                    <div className="text-center">
+                        <h2 className="text-xl font-black text-white">Agent Charlie</h2>
+                        <p className="text-[10px] text-slate-400 uppercase tracking-widest">{targetRole} Simulator</p>
+                    </div>
                     
-                    <div className="space-y-4">
-                       <select value={interviewPersona} onChange={(e) => setInterviewPersona(e.target.value as any)} disabled={status !== 'idle'} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm">{['Junior Peer', 'Senior Engineer', 'Staff Architect', 'Tech Lead', 'Hiring Manager'].map(p => <option key={p} value={p}>{p}</option>)}</select>
-                       <input value={interviewFocus} onChange={(e) => setInterviewFocus(e.target.value)} placeholder="Context (e.g. 5 YOE, React)" disabled={status !== 'idle'} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm" />
+                    <div className="flex justify-center my-4">
+                       <div className={`w-24 h-24 rounded-full flex items-center justify-center text-4xl transition-all duration-300 border-4 ${status === 'active' && isAiSpeaking ? 'border-indigo-400 shadow-[0_0_40px_rgba(99,102,241,0.5)] scale-110' : 'border-slate-800 bg-slate-900'}`}>
+                          {status === 'active' ? (isAiSpeaking ? '🤖' : '👂') : (status === 'mic-check' ? '🎤' : '😴')}
+                       </div>
+                    </div>
+
+                    <div className="space-y-3">
+                       <div>
+                           <select value={interviewPersona} onChange={(e) => setInterviewPersona(e.target.value as any)} disabled={status !== 'idle' && status !== 'finished'} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs">{['Junior Peer', 'Senior Engineer', 'Staff Architect', 'Tech Lead', 'Hiring Manager'].map(p => <option key={p} value={p}>{p}</option>)}</select>
+                           <div className="text-[10px] text-slate-500 mt-2 px-1 leading-snug">
+                               <span className="text-indigo-400 font-bold">Focus:</span> {PERSONA_DESCRIPTIONS[interviewPersona]}
+                           </div>
+                       </div>
                        
-                       {status === 'idle' && <button onClick={checkMic} className="w-full py-4 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white rounded-xl font-bold">1. Start System Check</button>}
+                       <input value={interviewFocus} onChange={(e) => setInterviewFocus(e.target.value)} placeholder="Context (e.g. React, AWS, PyTorch)" disabled={status !== 'idle' && status !== 'finished'} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs" />
+                       
+                       {(status === 'idle' || status === 'finished') && <button onClick={checkMic} className="w-full py-3 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white rounded-xl font-bold text-sm">1. System Check</button>}
                        
                        {status === 'mic-check' && (
-                          <div className="bg-slate-900 p-4 rounded-xl border border-indigo-500/30 text-center">
-                             <div className="text-xs font-bold text-indigo-400 mb-2">Mic Level</div>
-                             <div className="h-1.5 bg-black rounded-full w-full mb-4 overflow-hidden"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${Math.min(volume * 500, 100)}%` }}></div></div>
+                          <div className="bg-slate-900 p-3 rounded-xl border border-indigo-500/30 text-center">
+                             <div className="h-1.5 bg-black rounded-full w-full mb-3 overflow-hidden"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${Math.min(volume * 500, 100)}%` }}></div></div>
                              <div className="flex gap-2">
-                                <button onClick={playTestSound} className="flex-1 py-2 bg-slate-800 text-xs font-bold rounded-lg border border-slate-700">Test Speaker</button>
-                                <button onClick={connect} disabled={!hasApiKey} className="flex-1 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg shadow-lg shadow-indigo-500/20 disabled:opacity-50">2. Connect Agent</button>
+                                <button onClick={playTestSound} className="flex-1 py-2 bg-slate-800 text-[10px] font-bold rounded-lg border border-slate-700">Test Sound</button>
+                                <button onClick={connect} disabled={!hasApiKey} className="flex-1 py-2 bg-indigo-600 text-white text-[10px] font-bold rounded-lg shadow-lg">2. Connect</button>
                              </div>
                           </div>
                        )}
 
                        {(status === 'active' || status === 'connecting') && (
-                          <div className="flex gap-3">
-                             <button onClick={toggleMute} className={`flex-1 py-3 font-bold rounded-xl border ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-600'}`}>{isMuted ? 'Unmute' : 'Mute'}</button>
-                             <button onClick={endInterview} className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl">End Call</button>
+                          <div className="flex flex-col gap-2">
+                             <div className="flex gap-2">
+                                <button onClick={toggleMute} className={`flex-1 py-3 font-bold rounded-xl border text-xs ${isMuted ? 'bg-red-500/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-600'}`}>{isMuted ? 'Unmute' : 'Mute'}</button>
+                                <button onClick={endInterview} className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl text-xs">End Call</button>
+                             </div>
+                             
+                             {/* CODING MODE TOGGLE - ALWAYS AVAILABLE */}
+                             {!isCodingMode && (
+                                <div className="flex gap-2 w-full">
+                                    <button onClick={openScratchpad} className="flex-1 py-3 font-bold rounded-xl border border-blue-500/50 bg-slate-800 text-blue-400 text-xs hover:bg-blue-500/10 transition-colors flex items-center justify-center gap-1">
+                                    ⚡ Scratchpad
+                                    </button>
+                                    <button onClick={() => setShowChallengeSelector(true)} className="flex-1 py-3 font-bold rounded-xl border border-emerald-500/50 bg-slate-800 text-emerald-400 text-xs hover:bg-emerald-500/10 transition-colors flex items-center justify-center gap-1">
+                                    🧩 Challenges
+                                    </button>
+                                </div>
+                             )}
+                             
+                             {isCodingMode && (
+                                <button onClick={() => setIsCodingMode(false)} className="w-full py-3 font-bold rounded-xl border border-slate-700 bg-slate-800 text-slate-400 text-xs hover:text-white">
+                                   Minimize Code Editor
+                                </button>
+                             )}
                           </div>
                        )}
                     </div>
-
-                    <div className="mt-8 flex justify-center">
-                       <div className={`w-32 h-32 rounded-full flex items-center justify-center text-4xl transition-all duration-300 border-4 ${status === 'active' && isAiSpeaking ? 'border-indigo-400 shadow-[0_0_50px_rgba(99,102,241,0.5)] scale-105' : 'border-slate-800 bg-slate-900'}`}>
-                          {status === 'active' ? (isAiSpeaking ? '🤖' : '👂') : (status === 'mic-check' ? '🎤' : '😴')}
-                       </div>
-                    </div>
                  </div>
                  
-                 {/* Connection Log for Debugging */}
-                 <div className="bg-black/40 rounded-xl p-4 text-[10px] font-mono text-slate-500 h-32 overflow-y-auto">
+                 {/* Connection Log */}
+                 <div className="bg-black/40 rounded-xl p-3 text-[9px] font-mono text-slate-500 h-24 overflow-y-auto">
                     {connectionLogs.map((l, i) => <div key={i}>{l}</div>)}
                  </div>
               </div>
 
-              <div className="lg:col-span-8 space-y-6">
-                 {interviewFeedback ? (
-                    <div className="space-y-6 animate-fade-in-up">
-                       <button onClick={() => setInterviewFeedback(null)} className="mb-4 px-4 py-2 bg-slate-800 rounded-lg text-sm font-bold border border-slate-700">← New Interview</button>
-                       <div className="bg-slate-900/80 border border-white/10 p-8 rounded-3xl shadow-2xl flex items-center gap-8">
-                          <div>
-                             <div className="text-xs text-slate-400 font-bold uppercase mb-1">Total Score</div>
-                             <div className="text-5xl font-black text-white">{interviewFeedback.overallScore}</div>
-                          </div>
-                          <div className="h-12 w-px bg-slate-700"></div>
-                          <div>
-                             <div className="text-xs text-slate-400 font-bold uppercase mb-1">Verdict</div>
-                             <div className={`text-2xl font-black ${interviewFeedback.hiringRecommendation.includes('No') ? 'text-red-400' : 'text-emerald-400'}`}>{interviewFeedback.hiringRecommendation}</div>
-                          </div>
+              {/* --- COLUMN 2: TRANSCRIPT / SUMMARY (Middle in Coding Mode, Right in Normal Mode) --- */}
+              <div className={`${isCodingMode ? 'lg:col-span-3' : 'lg:col-span-8'} transition-all duration-500 h-[600px] flex flex-col`}>
+                   {interviewFeedback ? (
+                        <div className="space-y-6 animate-fade-in-up h-full overflow-y-auto">
+                           {/* INTERVIEW SUMMARY DASHBOARD */}
+                           <div className="flex items-center justify-between mb-4">
+                               <h2 className="text-xl font-black text-white">Interview Summary</h2>
+                               <button onClick={resetInterview} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold shadow-lg transition-all flex items-center gap-2">
+                                    <span>↺</span> Start New
+                               </button>
+                           </div>
+
+                           <div className="flex gap-2 mb-4 bg-slate-900/50 p-1 rounded-lg w-fit">
+                               <button onClick={() => setSummaryTab('overview')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${summaryTab === 'overview' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>Overview & Feedback</button>
+                               <button onClick={() => setSummaryTab('transcript')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${summaryTab === 'transcript' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>Full Transcript</button>
+                           </div>
+                           
+                           {summaryTab === 'overview' && (
+                               <div className="space-y-6 animate-fade-in-up">
+                                    <div className="bg-slate-900/80 border border-white/10 p-8 rounded-3xl shadow-2xl flex flex-col md:flex-row items-center gap-8 md:justify-around">
+                                        <div className="text-center">
+                                            <div className="text-xs text-slate-400 font-bold uppercase mb-1">Total Score</div>
+                                            <div className="text-6xl font-black text-white tracking-tighter">{interviewFeedback.overallScore}</div>
+                                        </div>
+                                        <div className="h-px w-full md:h-12 md:w-px bg-slate-700"></div>
+                                        <div className="text-center">
+                                            <div className="text-xs text-slate-400 font-bold uppercase mb-1">Verdict</div>
+                                            <div className={`text-3xl font-black ${interviewFeedback.hiringRecommendation.includes('No') ? 'text-red-400' : 'text-emerald-400'}`}>{interviewFeedback.hiringRecommendation}</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid md:grid-cols-2 gap-6">
+                                        <div className="glass-card p-6 rounded-2xl">
+                                            <div className="flex justify-between mb-4"><span className="font-bold">Technical Accuracy</span><span className="font-mono text-cyan-400">{interviewFeedback.technicalAccuracyScore}/100</span></div>
+                                            <div className="w-full bg-slate-900 rounded-full h-2"><div className="bg-cyan-500 h-2 rounded-full" style={{ width: `${interviewFeedback.technicalAccuracyScore}%` }}></div></div>
+                                            <p className="mt-3 text-xs text-slate-400">{interviewFeedback.technicalAccuracy}</p>
+                                        </div>
+                                        <div className="glass-card p-6 rounded-2xl">
+                                            <div className="flex justify-between mb-4"><span className="font-bold">Communication</span><span className="font-mono text-purple-400">{interviewFeedback.communicationClarityScore}/100</span></div>
+                                            <div className="w-full bg-slate-900 rounded-full h-2"><div className="bg-purple-500 h-2 rounded-full" style={{ width: `${interviewFeedback.communicationClarityScore}%` }}></div></div>
+                                            <p className="mt-3 text-xs text-slate-400">{interviewFeedback.communicationClarity}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="glass-card p-6 rounded-2xl">
+                                        <h3 className="font-bold mb-4">Detailed Evidence</h3>
+                                        <div className="space-y-3">
+                                            {interviewFeedback.detailedFeedback.map((f, i) => (
+                                                <div key={i} className={`p-4 rounded-xl border-l-4 ${f.category === 'Strength' ? 'bg-emerald-900/10 border-emerald-500' : 'bg-red-900/10 border-red-500'}`}>
+                                                <div className="text-xs font-black uppercase mb-1 opacity-70">{f.category}</div>
+                                                <div className="text-sm font-bold text-white mb-1">{f.observation}</div>
+                                                <div className="text-xs text-slate-400 italic">"{f.quote}"</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                               </div>
+                           )}
+
+                           {summaryTab === 'transcript' && (
+                               <div className="bg-slate-950 border border-slate-800 rounded-3xl p-4 h-[500px] overflow-y-auto flex flex-col relative animate-fade-in-up">
+                                   {transcript.map((t) => (
+                                       <div key={t.id} className={`mb-3 flex ${t.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                           <div className={`max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed ${t.speaker === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-300 rounded-bl-none'}`}>
+                                               <div className="text-[9px] font-bold uppercase opacity-50 mb-1">{t.speaker}</div>
+                                               <div className="whitespace-pre-wrap font-mono">{t.text}</div>
+                                           </div>
+                                       </div>
+                                   ))}
+                               </div>
+                           )}
+                        </div>
+                   ) : (
+                       <div className="h-full bg-slate-950 border border-slate-800 rounded-3xl p-4 overflow-y-auto flex flex-col-reverse relative">
+                           {/* Transcript Messages */}
+                           {transcript.filter(t => t.text && t.text.trim().length > 0).slice().reverse().map((t) => (
+                               <div key={t.id} className={`mb-3 flex ${t.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                   <div className={`max-w-[85%] p-3 rounded-2xl text-xs leading-relaxed ${t.speaker === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-300 rounded-bl-none'}`}>
+                                       <div className="text-[9px] font-bold uppercase opacity-50 mb-1">{t.speaker}</div>
+                                       <div className="whitespace-pre-wrap font-mono">{t.text}</div>
+                                   </div>
+                               </div>
+                           ))}
+                           {transcript.length === 0 && <div className="flex-1 flex items-center justify-center text-slate-600 font-bold italic text-xs">Transcript...</div>}
                        </div>
-                       <div className="grid md:grid-cols-2 gap-6">
-                          <div className="glass-card p-6 rounded-2xl">
-                             <div className="flex justify-between mb-4"><span className="font-bold">Technical Accuracy</span><span className="font-mono text-cyan-400">{interviewFeedback.technicalAccuracyScore}/100</span></div>
-                             <div className="w-full bg-slate-900 rounded-full h-2"><div className="bg-cyan-500 h-2 rounded-full" style={{ width: `${interviewFeedback.technicalAccuracyScore}%` }}></div></div>
-                             <p className="mt-4 text-xs text-slate-400">{interviewFeedback.technicalAccuracy}</p>
-                          </div>
-                          <div className="glass-card p-6 rounded-2xl">
-                             <div className="flex justify-between mb-4"><span className="font-bold">Communication</span><span className="font-mono text-purple-400">{interviewFeedback.communicationClarityScore}/100</span></div>
-                             <div className="w-full bg-slate-900 rounded-full h-2"><div className="bg-purple-500 h-2 rounded-full" style={{ width: `${interviewFeedback.communicationClarityScore}%` }}></div></div>
-                             <p className="mt-4 text-xs text-slate-400">{interviewFeedback.communicationClarity}</p>
-                          </div>
-                       </div>
-                       <div className="glass-card p-6 rounded-2xl">
-                          <h3 className="font-bold mb-4">Detailed Evidence</h3>
-                          <div className="space-y-3">
-                             {interviewFeedback.detailedFeedback.map((f, i) => (
-                                <div key={i} className={`p-4 rounded-xl border-l-4 ${f.category === 'Strength' ? 'bg-emerald-900/10 border-emerald-500' : 'bg-red-900/10 border-red-500'}`}>
-                                   <div className="text-xs font-black uppercase mb-1 opacity-70">{f.category}</div>
-                                   <div className="text-sm font-bold text-white mb-1">{f.observation}</div>
-                                   <div className="text-xs text-slate-400 italic">"{f.quote}"</div>
-                                </div>
-                             ))}
-                          </div>
-                       </div>
-                    </div>
-                 ) : (
-                    <div className="h-[600px] bg-slate-950 border border-slate-800 rounded-3xl p-6 overflow-y-auto flex flex-col-reverse">
-                       {/* Reverse map to ensure correct visual order (Newest at Bottom) for flex-col-reverse */}
-                       {/* Filter out empty items to prevent ghost bubbles and glitches */}
-                       {transcript.filter(t => t.text && t.text.trim().length > 0).slice().reverse().map((t) => (
-                          <div key={t.id} className={`mb-4 flex ${t.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
-                             <div className={`max-w-[80%] p-4 rounded-2xl text-sm ${t.speaker === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-300 rounded-bl-none'}`}>
-                                <div className="text-[10px] font-bold uppercase opacity-50 mb-1">{t.speaker}</div>
-                                {t.text}
-                             </div>
-                          </div>
-                       ))}
-                       {transcript.length === 0 && <div className="flex-1 flex items-center justify-center text-slate-600 font-bold italic">Transcript will appear here...</div>}
-                    </div>
-                 )}
+                   )}
               </div>
+
+              {/* --- COLUMN 3: CODE PAD (Right - Only Visible in Coding Mode) --- */}
+              {isCodingMode && !interviewFeedback && (
+                  <div className="lg:col-span-6 h-[600px] animate-fade-in-up">
+                      <CodePad 
+                          code={codeSnippet} 
+                          setCode={setCodeSnippet} 
+                          onSubmit={handleCodeSubmit}
+                          isSubmitting={isSendingCode}
+                          challenge={activeChallenge}
+                          evaluation={codeEvaluation}
+                          onNext={handleNextChallenge}
+                          hasNext={activeChallenge ? availableChallenges.findIndex(c => c.id === activeChallenge.id) < availableChallenges.length - 1 : false}
+                      />
+                  </div>
+              )}
+
             </div>
           )}
 
